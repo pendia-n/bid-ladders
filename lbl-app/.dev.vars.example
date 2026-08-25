@@ -1,0 +1,5 @@
+JWT_SECRET=generate-with-openssl
+ENCRYPTION_KEY=generate-with-openssl
+STRIPE_SECRET_KEY=sk_test_your_platform_key
+STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret
+APP_URL=http://localhost:5173
