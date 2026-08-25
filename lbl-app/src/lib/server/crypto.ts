@@ -33,7 +33,8 @@ export async function sha256(value: string): Promise<Uint8Array> {
 	return new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(value)));
 }
 
-export async function hashPassword(password: string, salt?: Uint8Array, iterations = 120000) {
+// Workers Web Crypto currently rejects PBKDF2 iteration counts above 100,000.
+export async function hashPassword(password: string, salt?: Uint8Array, iterations = 100000) {
 	const actualSalt = salt ?? crypto.getRandomValues(new Uint8Array(16));
 	const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
 	const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: arrayBuffer(actualSalt), iterations, hash: 'SHA-256' }, key, 256);

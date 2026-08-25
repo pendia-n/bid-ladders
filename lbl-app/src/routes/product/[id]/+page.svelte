@@ -1,0 +1,54 @@
+<script lang="ts">
+	import type { PageData } from './$types';
+
+	let { data }: { data: PageData } = $props();
+	const listing = $derived(data.listing as any);
+	const money = (value: number | null | undefined) => value == null ? 'Not provided' : value === 0 ? '$0' : `$${Math.round(value).toLocaleString()}`;
+	const percent = (value: number | null | undefined) => value == null ? 'Not provided' : `${value > 0 ? '+' : ''}${Number(value).toFixed(1)}%`;
+	let copied = $state(false);
+
+	async function shareListing() {
+		try {
+			if (navigator.share) await navigator.share({ title: listing?.name, text: listing?.summary, url: window.location.href });
+			else { await navigator.clipboard.writeText(window.location.href); copied = true; setTimeout(() => copied = false, 1800); }
+		} catch { /* Sharing can be cancelled by the user. */ }
+	}
+</script>
+
+<svelte:head>
+	<title>{listing ? `${listing.name} | BidLadders` : 'Product not found | BidLadders'}</title>
+	<meta name="description" content={listing?.summary || 'Product listing on BidLadders'} />
+</svelte:head>
+
+{#if !listing}
+	<div class="detail-shell"><a class="back-link" href="/">← Back to BidLadders</a><div class="empty-state detail-empty"><strong>Product listing not found.</strong><a class="button dark" href="/">Return to the board</a></div></div>
+{:else}
+	<div class="detail-shell">
+		<nav class="detail-nav"><a class="brand" href="/"><img class="brand-logo" src="/bid.svg" alt="" /><span>BidLadders</span></a><a class="back-link" href="/">← Board</a></nav>
+		<header class="detail-hero">
+			<div class="detail-identity"><div class="product-mark">{#if listing.images?.[0]}<img src={listing.images[0]} alt="" />{:else}<img src="/bid.svg" alt="" />{/if}</div><div><p class="eyebrow">PRODUCT · {listing.category || 'UNCLASSIFIED'}</p><h1>{listing.name}</h1><p class="detail-summary">{listing.summary}</p><p class="seller-line"><img src={listing.seller_profile_image_url || '/profile.svg'} alt="" /> Listed by @{listing.seller_username}</p></div></div>
+			<div class="detail-actions"><button class="button ghost" onclick={shareListing} title="Share this product">{copied ? 'Copied' : 'Share'}</button><a class="button dark" href={listing.product_url} target="_blank" rel="noreferrer">Visit product ↗</a></div>
+		</header>
+
+		<section class="detail-metrics" aria-label="Verified product metrics">
+			<article class="detail-metric"><span>All-time revenue</span><strong>{money(listing.total_revenue)}</strong><small>{listing.total_revenue == null ? 'Seller has not supplied this metric' : 'Seller-provided context'}</small></article>
+			<article class="detail-metric"><span>MRR</span><strong>{money(listing.mrr)}</strong><small>{listing.mrr_status === 'verified' ? 'Verified from seller-confirmed Stripe prices' : listing.mrr_status === 'zero' ? '$0 MRR stated by seller' : 'Not verified'}</small></article>
+			<article class="detail-metric"><span>Asking price</span><strong>{money(listing.asking_price)}</strong><small>Product-level listing, not an LLC sale</small></article>
+			<article class="detail-metric"><span>Operating cost</span><strong>{money(listing.operating_cost)}</strong><small>Monthly figure supplied by seller</small></article>
+		</section>
+
+		<section class="revenue-panel">
+			<div class="panel-heading"><div><p class="eyebrow">REVENUE SIGNAL</p><h2>{money(listing.last_30d_revenue)} <small>{percent(listing.growth_percent)} vs. prior period</small></h2></div><span class="period-chip">Last 30 days</span></div>
+			{#if listing.last_30d_revenue != null}<div class="bar-chart" aria-label="Last 30 days revenue supplied by seller"><span style="height: 35%"></span><span style="height: 56%"></span><span style="height: 42%"></span><span style="height: 72%"></span><span style="height: 61%"></span><span style="height: 86%"></span><span style="height: 68%"></span><span style="height: 92%"></span><span style="height: 75%"></span><span style="height: 64%"></span><span style="height: 78%"></span><span style="height: 48%"></span></div><div class="chart-axis"><span>30 days ago</span><span>Today</span></div>{:else}<div class="chart-empty"><strong>No revenue history attached yet.</strong><span>Connect a provider or add a seller-supplied snapshot to show this chart.</span></div>{/if}
+		</section>
+
+		<div class="detail-columns">
+			<section class="insights-section"><div class="panel-heading"><div><p class="eyebrow">PRODUCT INSIGHTS</p><h2>Context before contact.</h2></div></div><div class="insight-grid"><article><span>Problem solved</span><p>{listing.problem_solved || 'Not provided yet.'}</p></article><article><span>Audience</span><p>{listing.audience || 'Not provided yet.'}</p></article><article><span>Pricing</span><p>{listing.pricing_model || 'Not provided yet.'}</p></article><article><span>Tech stack</span><p>{listing.tech_stack || 'Not provided yet.'}</p></article><article><span>Description</span><p>{listing.description || 'The seller has not added a longer description.'}</p></article><article><span>Assets included</span><p>{listing.assets_included || 'Not provided yet.'}</p></article></div></section>
+			<aside class="contact-panel"><p class="eyebrow">INTERESTED?</p><h2>Make the first move.</h2><p>Buyer onboarding and deal-room conversation happen on the board. No anonymous offers.</p><a class="button yellow full" href="/?intent=offer&listing={listing.id}">Open a deal room</a><small>Offers are negotiated directly. BidLadders does not hold acquisition funds in this MVP.</small></aside>
+		</div>
+
+		<section class="connections-section"><div class="panel-heading"><div><p class="eyebrow">PROVIDER SIGNALS</p><h2>Connected where available.</h2></div><span class="panel-note">No Meta · No DataFast · No anonymous mode</span></div><div class="connection-grid"><article class:connected={!!listing.google_analytics_property}><strong>Google Analytics</strong><span>{listing.google_analytics_property || 'Not connected'}</span></article><article class:connected={!!listing.google_search_console_url}><strong>Google Search Console</strong><span>{listing.google_search_console_url || 'Not connected'}</span></article><article class:connected={!!listing.github_url}><strong>GitHub activity</strong>{#if listing.github_url}<a href={listing.github_url} target="_blank" rel="noreferrer">Open repository ↗</a>{:else}<span>Not connected</span>{/if}</article></div></section>
+		<section class="github-panel"><div><p class="eyebrow">GITHUB ACTIVITY</p><h2>{listing.github_url ? 'Repository supplied by the seller.' : 'No repository supplied yet.'}</h2><p>{listing.github_url ? 'Open the linked repository to inspect the public project history.' : 'A public repository link can be added by the seller; BidLadders will not fabricate contribution data.'}</p></div>{#if listing.github_url}<a class="button ghost" href={listing.github_url} target="_blank" rel="noreferrer">View GitHub ↗</a>{/if}</section>
+		<footer><span>BidLadders · product-level acquisition</span><span>MRR is a signal, not a promise.</span></footer>
+	</div>
+{/if}

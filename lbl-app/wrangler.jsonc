@@ -5,7 +5,7 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "lbl-app",
-	"main": ".svelte-kit/cloudflare/_worker.js",
+	"main": ".svelte-kit/cloudflare/custom-entry.mjs",
 	"compatibility_date": "2026-08-20",
 	"compatibility_flags": ["nodejs_compat"],
 	"assets": {
@@ -23,6 +23,20 @@
 			"database_id": "e2f269e8-bfeb-431f-b2a8-436d96c83ddf",
 			"migrations_dir": "migrations"
 		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "MEDIA",
+			"bucket_name": "lbl-media"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{ "name": "CAROUSEL_SLOTS", "class_name": "CarouselSlot" }
+		]
+	},
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["CarouselSlot"] }
 	]
 	/**
 	 * Smart Placement

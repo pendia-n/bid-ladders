@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash TEXT NOT NULL,
   password_salt TEXT NOT NULL,
-  password_iterations INTEGER NOT NULL DEFAULT 120000,
+  password_iterations INTEGER NOT NULL DEFAULT 100000,
   role TEXT NOT NULL CHECK (role IN ('seller', 'buyer')),
   totp_secret TEXT,
   totp_enabled INTEGER NOT NULL DEFAULT 0,

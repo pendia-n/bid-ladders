@@ -2,15 +2,19 @@
 	import { onMount } from 'svelte';
 
 	type Role = 'seller' | 'buyer';
-	type User = { id: number; username: string; role: Role; totp_enabled: boolean };
+	type User = { id: number; username: string; role: Role; totp_enabled: boolean; profile_image_key?: string | null };
 	type Listing = {
 		id: number; name: string; summary: string; description?: string; product_url: string;
 		asking_price: number; mrr: number; mrr_status: string; operating_cost: number;
 		assets_included: string; seller_username: string; rank: number; visible_on_home: boolean;
-		is_sponsored: boolean; paid_bid: number | null; verified_at?: string;
+		is_sponsored: boolean; paid_bid: number | null; verified_at?: string; seller_profile_image_url?: string; images?: string[];
+		category?: string | null; problem_solved?: string | null; audience?: string | null; pricing_model?: string | null; tech_stack?: string | null;
+		total_revenue?: number | null; last_30d_revenue?: number | null; active_customers?: number | null; growth_percent?: number | null; churn_percent?: number | null;
+		github_url?: string | null; google_analytics_property?: string | null; google_search_console_url?: string | null;
 	};
 	type Deal = { id: number; listing_id: number; listing_name: string; offer: number; status: string; buyer_username: string; seller_username: string };
 	type Message = { id: number; body: string; username: string; created_at: string };
+	type CarouselSlot = { id: number; status: 'available' | 'reserved' | 'paid'; listing?: { name: string; product_url: string; summary: string } | null; expiresAt?: number };
 	type Product = { id: string; name: string; description?: string; prices: { id: string; unit_amount: number; currency: string; recurring?: { interval: string; interval_count: number } }[] };
 
 	let user = $state<User | null>(null);
@@ -24,11 +28,12 @@
 	let loading = $state(true);
 	let error = $state('');
 	let notice = $state('');
-	let modal = $state<'auth' | 'buyer' | 'listing' | 'offer' | 'bid' | 'stripe' | null>(null);
+	let modal = $state<'auth' | 'buyer' | 'listing' | 'offer' | 'bid' | 'stripe' | 'carousel' | null>(null);
 	let authMode = $state<'login' | 'signup'>('signup');
 	let authRole = $state<Role>('buyer');
 	let authUsername = $state('');
 	let authPassword = $state('');
+	let profileFile = $state<File | null>(null);
 	let formName = $state('');
 	let formUrl = $state('');
 	let formSummary = $state('');
@@ -38,6 +43,20 @@
 	let formAssets = $state('');
 	let formMrrStatus = $state('unknown');
 	let formPublish = $state(true);
+	let listingFiles = $state<File[]>([]);
+	let formCategory = $state('');
+	let formProblem = $state('');
+	let formAudience = $state('');
+	let formPricing = $state('');
+	let formTechStack = $state('');
+	let formTotalRevenue = $state('');
+	let formLast30dRevenue = $state('');
+	let formActiveCustomers = $state('');
+	let formGrowth = $state('');
+	let formChurn = $state('');
+	let formGithubUrl = $state('');
+	let formGoogleAnalytics = $state('');
+	let formSearchConsole = $state('');
 	let stripeKey = $state('');
 	let stripeProducts = $state<Product[]>([]);
 	let selectedProduct = $state<Product | null>(null);
@@ -57,17 +76,35 @@
 	let buyerTimezone = $state('Asia/Hong_Kong');
 	let buyerBudget = $state('');
 	let buyerEntity = $state('personal');
+	let carouselSlots = $state<CarouselSlot[]>([]);
+	let carouselListingId = $state('');
+	let carouselSlotId = $state(0);
 
 	const money = (value: number) => value === 0 ? '$0' : `$${Math.round(value).toLocaleString()}`;
+	const optionalMoney = (value?: number | null) => value == null ? 'Not provided' : money(value);
+	const avatarUrl = (key?: string | null) => key ? `/api/media?key=${encodeURIComponent(key)}` : '/profile.svg';
 	const api = async (path: string, init: RequestInit = {}) => {
 		const headers = new Headers(init.headers);
-		headers.set('content-type', 'application/json');
+		if (!(init.body instanceof FormData)) headers.set('content-type', 'application/json');
 		if (token) headers.set('authorization', `Bearer ${token}`);
 		const response = await fetch(`/api/${path}`, { ...init, headers });
 		const data = await response.json().catch(() => ({}));
 		if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
 		return data;
 	};
+
+	function chooseProfile(event: Event) {
+		const file = (event.currentTarget as HTMLInputElement).files?.[0] || null;
+		if (file && file.size > 2 * 1024 * 1024) { error = 'Profile picture must be 2MB or smaller'; profileFile = null; return; }
+		profileFile = file;
+	}
+
+	function chooseListingImages(event: Event) {
+		const files = Array.from((event.currentTarget as HTMLInputElement).files || []);
+		if (files.some((file) => file.size > 2 * 1024 * 1024)) { error = 'Each listing image must be 2MB or smaller'; listingFiles = []; return; }
+		listingFiles = files.slice(0, 5);
+		if (files.length > 5) notice = 'Only the first five listing images were selected.';
+	}
 
 	async function loadListings() {
 		loading = true;
@@ -77,6 +114,17 @@
 			error = '';
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to load listings'; }
 		loading = false;
+	}
+
+	async function loadCarousel() {
+		try { carouselSlots = (await api('carousel')).slots || []; } catch { carouselSlots = Array.from({ length: 12 }, (_, index) => ({ id: index + 1, status: 'available' as const })); }
+	}
+
+	async function buyCarouselSpot() {
+		if (!user) { authMode = 'login'; modal = 'auth'; notice = 'Sign in as a seller to buy a product spot.'; return; }
+		if (user.role !== 'seller') { error = 'Only sellers can buy a product spot.'; return; }
+		if (!carouselListingId || !carouselSlotId) { error = 'Choose a product and an available spot first.'; return; }
+		try { const data = await api(`carousel/slots/${carouselSlotId}/reserve`, { method: 'POST', body: JSON.stringify({ listingId: Number(carouselListingId) }) }); window.location.href = data.url; } catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to reserve product spot'; await loadCarousel(); }
 	}
 
 	async function loadDeals() {
@@ -96,7 +144,13 @@
 		try {
 			const endpoint = authMode === 'signup' ? 'auth/signup' : 'auth/login';
 			const data = await api(endpoint, { method: 'POST', body: JSON.stringify({ username: authUsername, password: authPassword, role: authRole }) });
-			token = data.token; user = data.user; localStorage.setItem('lbl-token', token); modal = null; authPassword = ''; notice = authMode === 'signup' ? 'Account created. Complete the short onboarding step before acting.' : 'Welcome back.'; await loadDeals();
+			token = data.token; user = data.user; localStorage.setItem('lbl-token', token);
+			if (authMode === 'signup' && profileFile) {
+				const form = new FormData(); form.append('image', profileFile);
+				await api('media/profile', { method: 'POST', body: form });
+				user = (await api('auth/me')).user;
+			}
+			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; profileFile = null; notice = authMode === 'signup' ? 'Account created. Complete the short onboarding step before acting.' : 'Welcome back.'; await loadDeals();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to authenticate'; }
 	}
 
@@ -108,7 +162,13 @@
 
 	async function submitListing() {
 		try {
-			const data = await api('listings', { method: 'POST', body: JSON.stringify({ productUrl: formUrl, name: formName, summary: formSummary, description: formDescription, askingPrice: formPrice, operatingCost: formCosts, assetsIncluded: formAssets, mrrStatus: formMrrStatus, publish: formPublish }) });
+			const data = await api('listings', { method: 'POST', body: JSON.stringify({ productUrl: formUrl, name: formName, summary: formSummary, description: formDescription, askingPrice: formPrice, operatingCost: formCosts, assetsIncluded: formAssets, mrrStatus: formMrrStatus, publish: formPublish, category: formCategory, problemSolved: formProblem, audience: formAudience, pricingModel: formPricing, techStack: formTechStack, totalRevenue: formTotalRevenue, last30dRevenue: formLast30dRevenue, activeCustomers: formActiveCustomers, growthPercent: formGrowth, churnPercent: formChurn, githubUrl: formGithubUrl, googleAnalyticsProperty: formGoogleAnalytics, googleSearchConsoleUrl: formSearchConsole }) });
+			if (listingFiles.length && data.id) {
+				const form = new FormData();
+				for (const file of listingFiles) form.append('images', file);
+				await api(`listings/${data.id}/images`, { method: 'POST', body: form });
+			}
+			listingFiles = [];
 			modal = null; notice = formPublish ? 'Listing published. Verify its Stripe product to add the MRR signal.' : 'Draft saved.'; await loadListings();
 			if (stripeKey && data.id) { stripeListingId = data.id; modal = 'stripe'; }
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to save listing'; }
@@ -143,14 +203,26 @@
 		try { await api(`deals/${selectedDeal.id}/messages`, { method: 'POST', body: JSON.stringify({ body: messageDraft }) }); messageDraft = ''; await openDeal(selectedDeal); } catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to send message'; }
 	}
 
-	onMount(async () => { await restoreSession(); await loadListings(); });
+	async function handleIntent() {
+		const params = new URLSearchParams(window.location.search);
+		if (params.get('intent') !== 'offer') return;
+		const listingId = Number(params.get('listing'));
+		const target = listings.find((listing) => listing.id === listingId);
+		if (!target) return;
+		offerListing = target;
+		if (user?.role === 'buyer') modal = 'offer';
+		else { authMode = 'login'; modal = 'auth'; notice = 'Sign in as a buyer to open a deal room for this product.'; }
+		window.history.replaceState({}, '', `/`);
+	}
+
+	onMount(async () => { await restoreSession(); await Promise.all([loadListings(), loadCarousel()]); await handleIntent(); });
 </script>
 
 <svelte:head><title>BidLadders | Product-level acquisition board</title></svelte:head>
 
 <div class="app-shell">
 	<header class="topbar">
-		<a class="brand" href="/" aria-label="BidLadders home"><span class="brand-mark">BL</span><span>BidLadders</span></a>
+		<a class="brand" href="/" aria-label="BidLadders home"><img class="brand-logo" src="/bid.svg" alt="" /><span>BidLadders</span></a>
 		<nav class="nav" aria-label="Primary navigation">
 			<button class:active={view === 'market'} onclick={() => { view = 'market'; loadListings(); }}>Market</button>
 			<button class:active={view === 'mrr'} onclick={() => { view = 'mrr'; loadListings(); }}>All MRR</button>
@@ -158,7 +230,7 @@
 		</nav>
 		<div class="account-actions">
 			{#if user}
-				<span class="user-chip">@{user.username} <small>{user.role}</small></span>
+				<span class="user-chip"><img class="user-avatar" src={avatarUrl(user.profile_image_key)} alt="" />@{user.username} <small>{user.role}</small></span>
 				<button class="button ghost" onclick={signOut}>Sign out</button>
 			{:else}
 				<button class="button ghost" onclick={() => { authMode = 'login'; modal = 'auth'; }}>Sign in</button>
@@ -168,6 +240,10 @@
 	</header>
 
 	<main>
+		<section class="carousel-band" aria-label="24-hour product spots">
+			<div class="carousel-label"><span class="eyebrow">24-HOUR PRODUCT SPOTS</span><strong>$10</strong><small>Choose a listed product. One spot, one day.</small></div>
+			<div class="carousel-track">{#each [...carouselSlots, ...carouselSlots] as slot, index}<button class:occupied={slot.status === 'paid'} class="carousel-slot" title={slot.status === 'paid' ? `${slot.listing?.name || 'Product'} is live` : 'Buy this 24-hour spot'} onclick={() => { if (slot.status === 'available') { carouselSlotId = slot.id; carouselListingId = ''; modal = 'carousel'; } }}><span class="carousel-slot-index">{String((slot.id - 1) % 12 + 1).padStart(2, '0')}</span>{#if slot.status === 'paid' && slot.listing}<strong>{slot.listing.name}</strong><small>LIVE</small>{:else}<span class="carousel-empty">+</span>{/if}</button>{/each}</div>
+		</section>
 		<section class="masthead">
 			<div>
 				<p class="eyebrow">PRODUCT-LEVEL ACQUISITIONS</p>
@@ -192,7 +268,7 @@
 			{:else}<div class="deal-layout"><div class="deal-list">{#if !deals.length}<div class="empty-state compact"><strong>No deal rooms yet.</strong><span>Buyer offers create the first room.</span></div>{/if}{#each deals as deal}<button class="deal-row" class:selected={selectedDeal?.id === deal.id} onclick={() => openDeal(deal)}><span><strong>{deal.listing_name}</strong><small>{deal.buyer_username} ↔ {deal.seller_username}</small></span><span class="deal-amount">{money(deal.offer)}<small>{deal.status}</small></span></button>{/each}</div><div class="conversation">{#if selectedDeal}<div class="conversation-head"><div><p class="eyebrow">DEAL #{selectedDeal.id}</p><h3>{selectedDeal.listing_name}</h3></div><span class="status-tag">{selectedDeal.status}</span></div><div class="messages">{#each messages as message}<div class:mine={message.username === user.username} class="message"><small>@{message.username} · {new Date(message.created_at).toLocaleString()}</small><p>{message.body}</p></div>{/each}</div><form class="message-box" onsubmit={(event) => { event.preventDefault(); sendMessage(); }}><input bind:value={messageDraft} placeholder="Write a negotiation note..." /><button class="button dark" type="submit">Send</button></form>{:else}<div class="empty-state"><strong>Select a deal room.</strong><span>Offers and replies stay connected to the listing.</span></div>{/if}</div></div>{/if}
 		{:else}
 			<section class="workspace-heading"><div><p class="eyebrow">{view === 'market' ? 'THE FIRST 330' : 'SEARCHABLE ARCHIVE'}</p><h2>{view === 'market' ? 'The board is the product.' : 'Every listing stays discoverable.'}</h2></div><p>{view === 'market' ? 'A paid rank buys visibility for seven days. Free listings still earn their place by being early.' : 'Use the name filter to find listings beyond the homepage board.'}</p></section>
-			{#if loading}<div class="empty-state"><strong>Loading the board...</strong></div>{:else if !listings.length}<div class="empty-state"><strong>No listings match that search.</strong><span>Be the first product on the board.</span>{#if user?.role === 'seller'}<button class="button coral" onclick={() => modal = 'listing'}>List a product</button>{/if}</div>{:else}<div class="ladder-grid"><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER A</span><strong>01—165</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 0) as listing, index}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main"><div class="listing-title"><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions">{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER B</span><strong>166—330</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 1) as listing}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main"><div class="listing-title"><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions">{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section></div>{/if}
+			{#if loading}<div class="empty-state"><strong>Loading the board...</strong></div>{:else if !listings.length}<div class="empty-state"><strong>No listings match that search.</strong><span>Be the first product on the board.</span>{#if user?.role === 'seller'}<button class="button coral" onclick={() => modal = 'listing'}>List a product</button>{/if}</div>{:else}<div class="ladder-grid"><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER A</span><strong>01—165</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 0) as listing, index}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main">{#if listing.images?.[0]}<img class="listing-thumb" src={listing.images[0]} alt="" />{/if}<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions"><a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER B</span><strong>166—330</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 1) as listing}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main">{#if listing.images?.[0]}<img class="listing-thumb" src={listing.images[0]} alt="" />{/if}<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions"><a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section></div>{/if}
 		{/if}
 	</main>
 
@@ -206,13 +282,30 @@
 			{#if modal === 'auth'}
 				<p class="eyebrow">{authMode === 'signup' ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h2>{authMode === 'signup' ? 'Join the board.' : 'Sign in.'}</h2><p class="modal-intro">One account can be a seller or a buyer. Use a strong password; optional TOTP protects sensitive account actions.</p>
 				<div class="segmented"><button class:chosen={authMode === 'signup'} onclick={() => authMode = 'signup'}>Sign up</button><button class:chosen={authMode === 'login'} onclick={() => authMode = 'login'}>Sign in</button></div>
-				<div class="field"><label>Username</label><input bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label>Password</label><input type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label>I am here to</label><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account' : 'Sign in'}</button>
+				<div class="field"><label>Username</label><input bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label>Password</label><input type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label>Profile picture (optional, max 2MB)</label><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseProfile} /></div><div class="field"><label>I am here to</label><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account' : 'Sign in'}</button>
 			{:else if modal === 'buyer'}
 				<p class="eyebrow">BUYER ONBOARDING</p><h2>Make a credible first move.</h2><p class="modal-intro">Sellers see who is making an offer and what kind of buyer they are dealing with. No payment is taken at this step.</p><div class="form-grid"><div class="field"><label>Legal name</label><input bind:value={buyerLegal} /></div><div class="field"><label>Company name (optional)</label><input bind:value={buyerCompany} /></div><div class="field"><label>Role / title</label><input bind:value={buyerTitle} /></div><div class="field"><label>Country</label><input bind:value={buyerCountry} /></div><div class="field"><label>Timezone</label><input bind:value={buyerTimezone} /></div><div class="field"><label>Budget range</label><input bind:value={buyerBudget} placeholder="$5k–$25k" /></div></div><div class="field"><label>Purchase as</label><div class="segmented"><button class:chosen={buyerEntity === 'personal'} onclick={() => buyerEntity = 'personal'}>Personally</button><button class:chosen={buyerEntity === 'company'} onclick={() => buyerEntity = 'company'}>A company</button></div></div><button class="button dark full" onclick={submitBuyer}>Save buyer profile</button>
 			{:else if modal === 'listing'}
-				<p class="eyebrow">SELLER ONBOARDING</p><h2>List one product.</h2><p class="modal-intro">Your Stripe key is used only to find the exact product and Price IDs you confirm. The listing is not a sale of your LLC or Stripe account.</p><div class="field"><label>Product URL</label><input bind:value={formUrl} placeholder="https://yourproduct.com" /></div><div class="field"><label>Product name</label><input bind:value={formName} placeholder="Lipstick Digital" /></div><div class="field"><label>One-line summary</label><input bind:value={formSummary} placeholder="What does this product do?" /></div><div class="field"><label>Description {formMrrStatus === 'zero' ? '(required for $0 MRR)' : '(optional)'}</label><textarea bind:value={formDescription} rows="3" placeholder="Customers, distribution, stack, constraints, and what transfers..."></textarea></div><div class="form-grid"><div class="field"><label>Asking price (USD)</label><input type="number" bind:value={formPrice} min="0" /></div><div class="field"><label>Monthly operating cost</label><input type="number" bind:value={formCosts} min="0" /></div></div><div class="field"><label>Assets included</label><input bind:value={formAssets} placeholder="Code, domain, brand, customer list..." /></div><div class="field"><label>MRR status</label><div class="segmented"><button class:chosen={formMrrStatus === 'unknown'} onclick={() => formMrrStatus = 'unknown'}>Unknown</button><button class:chosen={formMrrStatus === 'zero'} onclick={() => formMrrStatus = 'zero'}>$0 MRR</button><button class:chosen={formMrrStatus === 'verified'} onclick={() => formMrrStatus = 'verified'}>Verified</button></div></div><div class="field check-row"><input id="publish" type="checkbox" bind:checked={formPublish} /><label for="publish">Publish immediately</label></div><div class="field"><label>Restricted Stripe key (optional now)</label><input type="password" bind:value={stripeKey} placeholder="rk_test_..." /></div><button class="button coral full" onclick={submitListing}>Save listing</button>
+				<p class="eyebrow">SELLER ONBOARDING</p>
+				<h2>List one product.</h2>
+				<p class="modal-intro">This is a product listing, not an LLC sale. Verified signals are shown only when the seller supplies or confirms them.</p>
+				<div class="field"><label for="form-url">Product URL</label><input id="form-url" bind:value={formUrl} placeholder="https://yourproduct.com" /></div>
+				<div class="field"><label for="form-name">Product name</label><input id="form-name" bind:value={formName} placeholder="Lipstick Digital" /></div>
+				<div class="field"><label for="form-summary">One-line summary</label><input id="form-summary" bind:value={formSummary} placeholder="What does this product do?" /></div>
+				<div class="form-grid"><div class="field"><label for="form-category">Category</label><input id="form-category" bind:value={formCategory} placeholder="Developer tools, media, education..." /></div><div class="field"><label for="form-audience">Audience</label><input id="form-audience" bind:value={formAudience} placeholder="Who uses this product?" /></div><div class="field"><label for="form-pricing">Pricing model</label><input id="form-pricing" bind:value={formPricing} placeholder="Subscription, one-time, usage-based..." /></div><div class="field"><label for="form-tech">Tech stack</label><input id="form-tech" bind:value={formTechStack} placeholder="Svelte, Cloudflare, Stripe..." /></div></div>
+				<div class="field"><label for="form-problem">Problem solved</label><textarea id="form-problem" bind:value={formProblem} rows="2" placeholder="What painful job does this product solve?"></textarea></div>
+				<div class="field"><label for="form-description">Description {formMrrStatus === 'zero' ? '(required for $0 MRR)' : '(optional)'}</label><textarea id="form-description" bind:value={formDescription} rows="4" placeholder="Customers, distribution, stack, constraints, and what transfers..."></textarea></div>
+				<div class="form-grid"><div class="field"><label for="form-price">Asking price (USD)</label><input id="form-price" type="number" bind:value={formPrice} min="0" /></div><div class="field"><label for="form-costs">Monthly operating cost</label><input id="form-costs" type="number" bind:value={formCosts} min="0" /></div></div>
+				<div class="field"><span class="field-label">Revenue context (optional)</span><div class="form-grid"><input type="number" bind:value={formTotalRevenue} min="0" placeholder="All-time revenue" aria-label="All-time revenue" /><input type="number" bind:value={formLast30dRevenue} min="0" placeholder="Last 30 days revenue" aria-label="Last 30 days revenue" /><input type="number" bind:value={formActiveCustomers} min="0" placeholder="Active customers" aria-label="Active customers" /><input type="number" bind:value={formGrowth} placeholder="Growth % (30d)" aria-label="Growth percent over 30 days" /></div></div>
+				<div class="provider-grid"><div class="provider-card"><span><strong>Google Analytics</strong><small>Optional property ID</small></span><input bind:value={formGoogleAnalytics} placeholder="G-XXXXXXXXXX" aria-label="Google Analytics property ID" /></div><div class="provider-card"><span><strong>Google Search Console</strong><small>Optional property URL</small></span><input bind:value={formSearchConsole} placeholder="https://yourproduct.com" aria-label="Google Search Console property URL" /></div><div class="provider-card"><span><strong>GitHub activity</strong><small>Optional public repository</small></span><input bind:value={formGithubUrl} placeholder="https://github.com/org/repo" aria-label="GitHub repository URL" /></div></div>
+				<div class="field stripe-key-row"><label for="stripe-key">Restricted Stripe key (optional)</label><div class="input-action"><input id="stripe-key" type="password" bind:value={stripeKey} placeholder="rk_test_..." /><a class="icon-button" href="https://dashboard.stripe.com/apikeys" target="_blank" rel="noreferrer" title="Open Stripe API keys in a new tab" aria-label="Open Stripe API keys in a new tab">↗</a></div><small class="field-help">Open Stripe in a new tab to create a restricted read-only key. BidLadders searches only the product you confirm.</small></div>
+				<div class="field"><label for="listing-images">Product images (optional, 0–5; max 2MB each)</label><input id="listing-images" type="file" multiple accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseListingImages} />{#if listingFiles.length}<small class="file-note">{listingFiles.length} image{listingFiles.length === 1 ? '' : 's'} selected</small>{/if}</div>
+				<div class="field check-row"><input id="publish" type="checkbox" bind:checked={formPublish} /><label for="publish">Publish immediately</label></div>
+				<button class="button coral full" onclick={submitListing}>Save listing</button>
 			{:else if modal === 'stripe'}
 				<p class="eyebrow">MRR VERIFICATION</p><h2>Confirm the exact Stripe product.</h2><p class="modal-intro">Search uses the product name as a starting point. You must choose the exact Product and Price IDs before any number is shown as verified.</p><div class="field"><label>Restricted read-only key</label><input type="password" bind:value={stripeKey} placeholder="rk_test_..." /></div><button class="button dark full" onclick={searchStripe}>Search Stripe</button>{#if stripeProducts.length}<div class="stripe-results">{#each stripeProducts as product}<button class="product-choice" class:chosen={selectedProduct?.id === product.id} onclick={() => { selectedProduct = product; selectedPrices = []; }}><strong>{product.name}</strong><small>{product.id}</small></button>{/each}</div>{/if}{#if selectedProduct}<div class="price-list"><p class="eyebrow">{selectedProduct.name} PRICES</p>{#each selectedProduct.prices as price}<label class="price-choice"><input type="checkbox" checked={selectedPrices.includes(price.id)} onchange={(event) => selectedPrices = event.currentTarget.checked ? [...selectedPrices, price.id] : selectedPrices.filter((id) => id !== price.id)} /><span>{price.id}<small>{price.currency.toUpperCase()} {((price.unit_amount || 0) / 100).toFixed(2)} · {price.recurring?.interval || 'one-time'}</small></span></label>{/each}</div><button class="button mint full" onclick={verifyStripe}>Verify selected Prices</button>{/if}
+			{:else if modal === 'carousel'}
+				<p class="eyebrow">24-HOUR PRODUCT SPOT</p><h2>Put one product in the moving strip.</h2><p class="modal-intro">$10 buys the selected carousel position for exactly 24 hours. Your product must already be published. The spot is reserved before checkout.</p><div class="field"><label for="carousel-product">Product to display</label><select id="carousel-product" bind:value={carouselListingId}><option value="">Choose a published product</option>{#each listings.filter((listing) => listing.seller_username === user?.username) as listing}<option value={listing.id}>{listing.name}</option>{/each}</select></div><button class="button coral full" onclick={buyCarouselSpot}>Continue to secure checkout · $10</button>
 			{:else if modal === 'offer' && offerListing}
 				<p class="eyebrow">FIRST MOVE</p><h2>Open a conversation about {offerListing.name}.</h2><p class="modal-intro">This creates an offer and a private deal room. Acquisition funds are not held by BidLadders in this MVP.</p><div class="field"><label>Your offer (USD)</label><input type="number" bind:value={offerAmount} min="0" /></div><div class="field"><label>Message to the seller</label><textarea bind:value={offerMessage} rows="5" placeholder="Introduce yourself, explain the fit, and name your proposed next step..."></textarea></div><button class="button yellow full" onclick={submitOffer}>Send offer</button>
 			{:else if modal === 'bid' && bidListing}
