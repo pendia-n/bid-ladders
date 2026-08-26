@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -7,6 +8,14 @@
 	const percent = (value: number | null | undefined) => value == null ? 'Not provided' : `${value > 0 ? '+' : ''}${Number(value).toFixed(1)}%`;
 	const techStack = (value: unknown) => { try { const parsed = JSON.parse(String(value || '')); return Array.isArray(parsed) ? parsed.join(' · ') : String(value || 'Not provided yet.'); } catch { return String(value || 'Not provided yet.'); } };
 	let copied = $state(false);
+	let githubActivity = $state<any>(null);
+	let githubLoading = $state(false);
+
+	onMount(async () => {
+		if (!listing?.github_url) return;
+		githubLoading = true;
+		try { const response = await fetch(`/api/listings/${encodeURIComponent(listing.id)}/github`); if (response.ok) githubActivity = (await response.json()).activity; } finally { githubLoading = false; }
+	});
 
 	async function shareListing() {
 		try {
@@ -49,7 +58,7 @@
 		</div>
 
 		<section class="connections-section"><div class="panel-heading"><div><p class="eyebrow">PROVIDER SIGNALS</p><h2>Connected where available.</h2></div><span class="panel-note">No Meta · No DataFast · No anonymous mode</span></div><div class="connection-grid"><article class:connected={!!listing.google_analytics_property}><strong>Google Analytics</strong><span>{listing.google_analytics_property || 'Not connected'}</span></article><article class:connected={!!listing.google_search_console_url}><strong>Google Search Console</strong><span>{listing.google_search_console_url || 'Not connected'}</span></article><article class:connected={!!listing.github_url}><strong>GitHub activity</strong>{#if listing.github_url}<a href={listing.github_url} target="_blank" rel="noreferrer">Open repository ↗</a>{:else}<span>Not connected</span>{/if}</article></div></section>
-		<section class="github-panel"><div><p class="eyebrow">GITHUB ACTIVITY</p><h2>{listing.github_url ? 'Repository supplied by the seller.' : 'No repository supplied yet.'}</h2><p>{listing.github_url ? 'Open the linked repository to inspect the public project history.' : 'A public repository link can be added by the seller; BidLadders will not fabricate contribution data.'}</p></div>{#if listing.github_url}<a class="button ghost" href={listing.github_url} target="_blank" rel="noreferrer">View GitHub ↗</a>{/if}</section>
+		<section class="github-panel"><div><p class="eyebrow">GITHUB ACTIVITY</p>{#if !listing.github_url}<h2>No repository supplied yet.</h2><p>A public repository link can be added by the seller.</p>{:else if githubLoading}<h2>Loading repository activity...</h2><p>Reading the public repository timeline.</p>{:else if githubActivity}<h2>{githubActivity.repository.name}</h2><p>{githubActivity.repository.description || 'Public repository activity is connected to this product.'}</p><div class="github-stats"><span>{githubActivity.events?.length || 0} recent events</span><span>{githubActivity.repository.stars} stars</span><span>{githubActivity.repository.forks} forks</span>{#if githubActivity.repository.language}<span>{githubActivity.repository.language}</span>{/if}</div>{:else}<h2>Repository activity unavailable.</h2><p>The URL is saved, but GitHub did not return a readable public timeline.</p>{/if}</div>{#if listing.github_url}<a class="button ghost" href={listing.github_url} target="_blank" rel="noreferrer">View GitHub ↗</a>{/if}</section>
 		<footer><span>BidLadders · product-level acquisition</span><span>MRR is a signal, not a promise.</span></footer>
 	</div>
 {/if}

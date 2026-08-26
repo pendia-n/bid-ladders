@@ -1,5 +1,5 @@
 import type { RequestEvent } from '@sveltejs/kit';
-import { encryptText, verifyTotp } from '$lib/server/crypto';
+import { decryptText, encryptText, verifyTotp } from '$lib/server/crypto';
 import { envFrom, getDb, loginUser, registerUser, requireUser, userFromToken, verifyUserTotp, type AuthUser } from '$lib/server/auth';
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
@@ -92,8 +92,53 @@ async function carouselRequest(event: RequestEvent, slotId: number, path: string
 }
 
 function normalized(value: string) { return value.trim().toLowerCase().replace(/\s+/g, ' '); }
+function searchTokens(value: unknown) { return new Set(String(value || '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)); }
+function tokenMatch(query: string, values: unknown[]) {
+	const target = searchTokens(query);
+	if (!target.size) return false;
+	const haystack = new Set(values.flatMap((value) => [...searchTokens(value)]));
+	return [...target].every((token) => haystack.has(token));
+}
+function parsedJson(value: string | null) { try { return value ? JSON.parse(value) : null; } catch { return null; } }
 
-type ListingRow = { id: number; seller_id: number; product_url: string; name: string; summary: string; description: string | null; asking_price_cents: number; mrr_cents: number; mrr_status: string; verified_at: string | null; operating_cost_cents: number; assets_included: string; product_icon_key: string | null; created_at: string; seller_username: string; seller_profile_image_key: string | null; category: string | null; problem_solved: string | null; audience: string | null; pricing_model: string | null; tech_stack: string | null; total_revenue_cents: number | null; last_30d_revenue_cents: number | null; active_customers: number | null; growth_percent: number | null; churn_percent: number | null; github_url: string | null; google_analytics_property: string | null; google_search_console_url: string | null };
+function githubRepoPath(value: string) {
+	try {
+		const url = new URL(value);
+		if (url.hostname.toLowerCase() !== 'github.com') return null;
+		const parts = url.pathname.split('/').filter(Boolean).map((part) => part.replace(/\.git$/, ''));
+		return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
+	} catch { return null; }
+}
+
+async function githubGet(path: string) {
+	const response = await fetch(`https://api.github.com/${path}`, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'BidLadders/1.0' } });
+	if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+	return response.json() as Promise<any>;
+}
+
+async function fetchGithubActivity(url: string) {
+	const repoPath = githubRepoPath(url);
+	if (!repoPath) throw new Error('Use a public github.com/owner/repository URL');
+	const [repository, events] = await Promise.all([githubGet(`repos/${repoPath}`), githubGet(`repos/${repoPath}/events?per_page=30`)]);
+	return { repository: { name: repository.full_name, description: repository.description, stars: Number(repository.stargazers_count || 0), forks: Number(repository.forks_count || 0), language: repository.language || null, pushedAt: repository.pushed_at || null }, events: (Array.isArray(events) ? events : []).slice(0, 30).map((event: any) => ({ id: event.id, type: event.type, actor: event.actor?.login || null, createdAt: event.created_at || null, ref: event.payload?.ref || event.payload?.action || null, commits: Array.isArray(event.payload?.commits) ? event.payload.commits.length : 0 })) };
+}
+
+async function syncGithubActivity(event: RequestEvent, listingId: number, url: string) {
+	const activity = await fetchGithubActivity(url);
+	const syncedAt = now();
+	await getDb(event).prepare('UPDATE listing_details SET github_activity_json = ?, github_synced_at = ?, updated_at = CURRENT_TIMESTAMP WHERE listing_id = ?').bind(JSON.stringify(activity), syncedAt, listingId).run();
+	return { activity, syncedAt };
+}
+
+async function storedStripeKey(event: RequestEvent, sellerId: number, suppliedKey: string) {
+	if (suppliedKey) return suppliedKey;
+	const connection = await getDb(event).prepare('SELECT encrypted_key FROM stripe_connections WHERE seller_id = ?').bind(sellerId).first<{ encrypted_key: string }>();
+	if (!connection?.encrypted_key) throw new Error('Enter a Stripe restricted key once; it can then be reused for all your product listings');
+	const secret = envFrom(event).ENCRYPTION_KEY || envFrom(event).JWT_SECRET || 'local-development-only-change-me';
+	return decryptText(connection.encrypted_key, secret);
+}
+
+type ListingRow = { id: number; seller_id: number; product_url: string; name: string; summary: string; description: string | null; asking_price_cents: number; mrr_cents: number; mrr_status: string; verified_at: string | null; operating_cost_cents: number; assets_included: string; product_icon_key: string | null; created_at: string; seller_username: string; seller_profile_image_key: string | null; category: string | null; problem_solved: string | null; audience: string | null; pricing_model: string | null; tech_stack: string | null; total_revenue_cents: number | null; last_30d_revenue_cents: number | null; active_customers: number | null; growth_percent: number | null; churn_percent: number | null; github_url: string | null; github_activity_json: string | null; github_synced_at: string | null; google_analytics_property: string | null; google_search_console_url: string | null };
 type BidRow = { id: number; listing_id: number; amount_cents: number; paid_at: string; expires_at: string };
 
 async function loadRankedListings(event: RequestEvent, query = '') {
@@ -101,7 +146,7 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 	const search = normalized(query);
 	const filter = search ? 'AND (LOWER(l.name) LIKE ? OR LOWER(l.summary) LIKE ?)' : '';
 	const args = search ? [`%${search}%`, `%${search}%`] : [];
-	const listingRows = await db.prepare(`SELECT l.id, l.seller_id, l.product_url, l.name, l.summary, l.description, l.asking_price_cents, l.mrr_cents, l.mrr_status, l.verified_at, l.operating_cost_cents, l.assets_included, l.product_icon_key, l.created_at, u.username AS seller_username, u.profile_image_key AS seller_profile_image_key, d.category, d.problem_solved, d.audience, d.pricing_model, d.tech_stack, d.total_revenue_cents, d.last_30d_revenue_cents, d.active_customers, d.growth_percent, d.churn_percent, d.github_url, d.google_analytics_property, d.google_search_console_url FROM listings l JOIN users u ON u.id = l.seller_id LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.status = 'published' ${filter}`).bind(...args).all<ListingRow>();
+	const listingRows = await db.prepare(`SELECT l.id, l.seller_id, l.product_url, l.name, l.summary, l.description, l.asking_price_cents, l.mrr_cents, l.mrr_status, l.verified_at, l.operating_cost_cents, l.assets_included, l.product_icon_key, l.created_at, u.username AS seller_username, u.profile_image_key AS seller_profile_image_key, d.category, d.problem_solved, d.audience, d.pricing_model, d.tech_stack, d.total_revenue_cents, d.last_30d_revenue_cents, d.active_customers, d.growth_percent, d.churn_percent, d.github_url, d.github_activity_json, d.github_synced_at, d.google_analytics_property, d.google_search_console_url FROM listings l JOIN users u ON u.id = l.seller_id LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.status = 'published' ${filter}`).bind(...args).all<ListingRow>();
 	const bidRows = await db.prepare(`SELECT id, listing_id, amount_cents, paid_at, expires_at FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC`).bind(now()).all<BidRow>();
 	const imageRows = await db.prepare('SELECT listing_id, object_key, sort_order FROM listing_images ORDER BY sort_order ASC, id ASC').all<{ listing_id: number; object_key: string; sort_order: number }>();
 	const imagesByListing = new Map<number, string[]>();
@@ -126,7 +171,9 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 		paid_bid: bestBid.has(listing.id) ? Number(bestBid.get(listing.id)!.amount_cents) / 100 : null,
 		rank: index + 1,
 		visible_on_home: index < 330,
-		is_sponsored: bestBid.has(listing.id)
+		is_sponsored: bestBid.has(listing.id),
+		github_activity: parsedJson(listing.github_activity_json),
+		github_synced_at: listing.github_synced_at
 	}));
 }
 
@@ -143,9 +190,14 @@ async function verifyStripeSignature(bodyText: string, signature: string, secret
 
 async function matchingStripeProducts(key: string, name: string) {
 	const products = await stripeListAll(key, 'products', { active: 'true' });
-	const target = normalized(name);
-	return Promise.all(products.filter((product: any) => normalized(product.name).includes(target) || target.includes(normalized(product.name))).slice(0, 10).map(async (product: any) => {
-		const prices = await stripePricesForProduct(key, product.id);
+	const allPrices = await Promise.all(['true', 'false'].map((active) => stripeListAll(key, 'prices', { active })));
+	const pricesByProduct = new Map<string, any[]>();
+	for (const price of allPrices.flat()) pricesByProduct.set(String(price.product), [...(pricesByProduct.get(String(price.product)) || []), price]);
+	return Promise.all(products.filter((product: any) => {
+		const prices = pricesByProduct.get(String(product.id)) || [];
+		return tokenMatch(name, [product.name, product.description, ...prices.flatMap((price) => [price.nickname, price.lookup_key, JSON.stringify(price.metadata || {})])]);
+	}).slice(0, 10).map(async (product: any) => {
+		const prices = pricesByProduct.get(String(product.id)) || await stripePricesForProduct(key, product.id);
 		return { id: product.id, name: product.name, description: product.description, prices: prices.map((price: any) => ({ id: price.id, active: price.active, unit_amount: price.unit_amount, currency: price.currency, recurring: price.recurring })) };
 	}));
 }
@@ -359,10 +411,12 @@ async function handle(event: RequestEvent): Promise<Response> {
 	if (route === 'listings' && method === 'POST') {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const input = await body(event);
 		const name = String(input.name || '').trim(); const summary = String(input.summary || '').trim(); const description = String(input.description || '').trim(); const mrrStatus = ['unknown', 'zero', 'verified'].includes(input.mrrStatus) ? input.mrrStatus : 'unknown';
+		const githubUrl = String(input.githubUrl || '').trim();
 		if (!name || !summary || !input.productUrl || !input.assetsIncluded) return json({ error: 'Product URL, name, summary, and assets included are required' }, 400);
 		if (mrrStatus === 'zero' && description.length < 60) return json({ error: 'A $0 MRR listing needs a detailed description of at least 60 characters' }, 400);
 		const result = await getDb(event).prepare('INSERT INTO listings (seller_id, product_url, name, summary, description, asking_price_cents, mrr_status, operating_cost_cents, assets_included, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(user.id, input.productUrl, name, summary, description || null, asCents(input.askingPrice), mrrStatus, asCents(input.operatingCost), input.assetsIncluded, input.publish ? 'published' : 'draft').run();
-		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(result.meta.last_row_id, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), String(input.githubUrl || '').trim() || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null).run();
+		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(result.meta.last_row_id, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), githubUrl || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null).run();
+		if (githubUrl) await syncGithubActivity(event, Number(result.meta.last_row_id), githubUrl).catch((error) => console.error('GitHub sync failed', error));
 		await audit(event, user.id, 'listing.created', 'listing', String(result.meta.last_row_id), { status: input.publish ? 'published' : 'draft' });
 		return json({ id: result.meta.last_row_id });
 	}
@@ -372,11 +426,12 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const listingId = Number(segments[1]); const input = await body(event);
 		const listing = await getDb(event).prepare('SELECT id, mrr_cents, verified_at FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number; mrr_cents: number; verified_at: string | null }>();
 		if (!listing) return json({ error: 'Listing not found' }, 404);
-		const name = String(input.name || '').trim(); const summary = String(input.summary || '').trim(); const description = String(input.description || '').trim(); const productUrl = String(input.productUrl || '').trim(); const assetsIncluded = String(input.assetsIncluded || '').trim(); const mrrStatus = ['unknown', 'zero', 'verified'].includes(input.mrrStatus) ? input.mrrStatus : 'unknown';
+		const name = String(input.name || '').trim(); const summary = String(input.summary || '').trim(); const description = String(input.description || '').trim(); const productUrl = String(input.productUrl || '').trim(); const assetsIncluded = String(input.assetsIncluded || '').trim(); const mrrStatus = ['unknown', 'zero', 'verified'].includes(input.mrrStatus) ? input.mrrStatus : 'unknown'; const githubUrl = String(input.githubUrl || '').trim();
 		if (!name || !summary || !productUrl || !assetsIncluded) return json({ error: 'Product URL, name, summary, and assets included are required' }, 400);
 		if (mrrStatus === 'zero' && description.length < 60) return json({ error: 'A $0 MRR listing needs a detailed description of at least 60 characters' }, 400);
 		await getDb(event).prepare('UPDATE listings SET product_url = ?, name = ?, summary = ?, description = ?, asking_price_cents = ?, mrr_status = ?, mrr_cents = ?, verified_at = ?, operating_cost_cents = ?, assets_included = ?, status = ?, updated_at = ? WHERE id = ? AND seller_id = ?').bind(productUrl, name, summary, description || null, asCents(input.askingPrice), mrrStatus, mrrStatus === 'verified' ? listing.mrr_cents : 0, mrrStatus === 'verified' ? listing.verified_at : null, asCents(input.operatingCost), assetsIncluded, input.publish ? 'published' : 'draft', now(), listingId, user.id).run();
-		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET category=excluded.category, problem_solved=excluded.problem_solved, audience=excluded.audience, pricing_model=excluded.pricing_model, tech_stack=excluded.tech_stack, total_revenue_cents=excluded.total_revenue_cents, last_30d_revenue_cents=excluded.last_30d_revenue_cents, active_customers=excluded.active_customers, growth_percent=excluded.growth_percent, churn_percent=excluded.churn_percent, github_url=excluded.github_url, google_analytics_property=excluded.google_analytics_property, google_search_console_url=excluded.google_search_console_url, updated_at=CURRENT_TIMESTAMP').bind(listingId, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), String(input.githubUrl || '').trim() || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null).run();
+		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET category=excluded.category, problem_solved=excluded.problem_solved, audience=excluded.audience, pricing_model=excluded.pricing_model, tech_stack=excluded.tech_stack, total_revenue_cents=excluded.total_revenue_cents, last_30d_revenue_cents=excluded.last_30d_revenue_cents, active_customers=excluded.active_customers, growth_percent=excluded.growth_percent, churn_percent=excluded.churn_percent, github_url=excluded.github_url, google_analytics_property=excluded.google_analytics_property, google_search_console_url=excluded.google_search_console_url, updated_at=CURRENT_TIMESTAMP').bind(listingId, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), githubUrl || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null).run();
+		if (githubUrl) await syncGithubActivity(event, listingId, githubUrl).catch((error) => console.error('GitHub sync failed', error));
 		await audit(event, user.id, 'listing.updated', 'listing', String(listingId), { status: input.publish ? 'published' : 'draft' });
 		return json({ ok: true, id: listingId });
 	}
@@ -427,8 +482,19 @@ async function handle(event: RequestEvent): Promise<Response> {
 		} catch (error: any) { return json({ error: error?.message || 'Product icon upload failed' }, 400); }
 	}
 
+	if (segments[0] === 'listings' && segments[1] && segments[2] === 'github' && method === 'GET') {
+		const listingId = Number(segments[1]);
+		const record = await getDb(event).prepare("SELECT l.status, d.github_url, d.github_activity_json, d.github_synced_at FROM listings l LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.id = ? AND l.status = 'published'").bind(listingId).first<{ status: string; github_url: string | null; github_activity_json: string | null; github_synced_at: string | null }>();
+		if (!record?.github_url) return json({ error: 'No public GitHub repository is connected' }, 404);
+		const fresh = record.github_synced_at && Date.now() - Date.parse(record.github_synced_at) < 15 * 60 * 1000;
+		if (fresh && record.github_activity_json) return json({ activity: parsedJson(record.github_activity_json), syncedAt: record.github_synced_at });
+		try { return json(await syncGithubActivity(event, listingId, record.github_url)); }
+		catch (error: any) { return record.github_activity_json ? json({ activity: parsedJson(record.github_activity_json), syncedAt: record.github_synced_at, stale: true }) : json({ error: error?.message || 'Unable to load GitHub activity' }, 502); }
+	}
+
 	if (segments[0] === 'stripe' && segments[1] === 'search' && method === 'POST') {
-		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const input = await body(event); const key = String(input.stripeKey || '');
+		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const input = await body(event); let key: string;
+		try { key = await storedStripeKey(event, user.id, String(input.stripeKey || '')); } catch (error: any) { return json({ error: error?.message || 'Stripe key is required' }, 400); }
 		if (!/^rk_(test|live)_/.test(key)) return json({ error: 'Use a Stripe restricted read-only key beginning with rk_test_ or rk_live_' }, 400);
 		try { return json({ products: await matchingStripeProducts(key, String(input.name || '')) }); } catch (error: any) { return json({ error: error?.message || 'Stripe search failed' }, 400); }
 	}
@@ -437,7 +503,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const listingId = Number(segments[1]);
 		const listing = await getDb(event).prepare('SELECT id, name FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number; name: string }>();
 		if (!listing) return json({ error: 'Listing not found' }, 404);
-		const input = await body(event); const key = String(input.stripeKey || ''); const productId = String(input.productId || '');
+		const input = await body(event); let key: string; try { key = await storedStripeKey(event, user.id, String(input.stripeKey || '')); } catch (error: any) { return json({ error: error?.message || 'Stripe key is required' }, 400); } const productId = String(input.productId || '');
 		if (!/^rk_(test|live)_/.test(key) || !/^prod_/.test(productId)) return json({ error: 'Confirm a Stripe Product' }, 400);
 		try {
 			const product = await stripeGet(key, `products/${encodeURIComponent(productId)}`);

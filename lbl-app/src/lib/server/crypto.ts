@@ -67,6 +67,14 @@ export async function encryptText(plaintext: string, secret: string): Promise<st
 	return bytesToBase64(output);
 }
 
+export async function decryptText(encoded: string, secret: string): Promise<string> {
+	const input = base64ToBytes(encoded);
+	const keyMaterial = await sha256(secret);
+	const key = await crypto.subtle.importKey('raw', arrayBuffer(keyMaterial), { name: 'AES-GCM' }, false, ['decrypt']);
+	const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: input.slice(0, 12) }, key, input.slice(12));
+	return new TextDecoder().decode(plaintext);
+}
+
 export function randomSecret(bytes = 20): string {
 	return bytesToBase64(crypto.getRandomValues(new Uint8Array(bytes)));
 }
