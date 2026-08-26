@@ -5,6 +5,7 @@
 	const listing = $derived(data.listing as any);
 	const money = (value: number | null | undefined) => value == null ? 'Not provided' : value === 0 ? '$0' : `$${Math.round(value).toLocaleString()}`;
 	const percent = (value: number | null | undefined) => value == null ? 'Not provided' : `${value > 0 ? '+' : ''}${Number(value).toFixed(1)}%`;
+	const techStack = (value: unknown) => { try { const parsed = JSON.parse(String(value || '')); return Array.isArray(parsed) ? parsed.join(' · ') : String(value || 'Not provided yet.'); } catch { return String(value || 'Not provided yet.'); } };
 	let copied = $state(false);
 
 	async function shareListing() {
@@ -26,7 +27,7 @@
 	<div class="detail-shell">
 		<nav class="detail-nav"><a class="brand" href="/"><img class="brand-logo" src="/bid.svg" alt="" /><span>BidLadders</span></a><a class="back-link" href="/">← Board</a></nav>
 		<header class="detail-hero">
-			<div class="detail-identity"><div class="product-mark">{#if listing.images?.[0]}<img src={listing.images[0]} alt="" />{:else}<img src="/bid.svg" alt="" />{/if}</div><div><p class="eyebrow">PRODUCT · {listing.category || 'UNCLASSIFIED'}</p><h1>{listing.name}</h1><p class="detail-summary">{listing.summary}</p><p class="seller-line"><img src={listing.seller_profile_image_url || '/profile.svg'} alt="" /> Listed by @{listing.seller_username}</p></div></div>
+			<div class="detail-identity"><div class="product-mark">{#if listing.product_icon_url || listing.images?.[0]}<img src={listing.product_icon_url || listing.images?.[0]} alt="" />{:else}<img src="/bid.svg" alt="" />{/if}</div><div><p class="eyebrow">PRODUCT · {listing.category || 'UNCLASSIFIED'}</p><h1>{listing.name}</h1><p class="detail-summary">{listing.summary}</p><p class="seller-line"><img src={listing.seller_profile_image_url || '/profile.svg'} alt="" /> Listed by @{listing.seller_username}</p></div></div>
 			<div class="detail-actions"><button class="button ghost" onclick={shareListing} title="Share this product">{copied ? 'Copied' : 'Share'}</button><a class="button dark" href={listing.product_url} target="_blank" rel="noreferrer">Visit product ↗</a></div>
 		</header>
 
@@ -43,7 +44,7 @@
 		</section>
 
 		<div class="detail-columns">
-			<section class="insights-section"><div class="panel-heading"><div><p class="eyebrow">PRODUCT INSIGHTS</p><h2>Context before contact.</h2></div></div><div class="insight-grid"><article><span>Problem solved</span><p>{listing.problem_solved || 'Not provided yet.'}</p></article><article><span>Audience</span><p>{listing.audience || 'Not provided yet.'}</p></article><article><span>Pricing</span><p>{listing.pricing_model || 'Not provided yet.'}</p></article><article><span>Tech stack</span><p>{listing.tech_stack || 'Not provided yet.'}</p></article><article><span>Description</span><p>{listing.description || 'The seller has not added a longer description.'}</p></article><article><span>Assets included</span><p>{listing.assets_included || 'Not provided yet.'}</p></article></div></section>
+			<section class="insights-section"><div class="panel-heading"><div><p class="eyebrow">PRODUCT INSIGHTS</p><h2>Context before contact.</h2></div></div><div class="insight-grid"><article><span>Problem solved</span><p>{listing.problem_solved || 'Not provided yet.'}</p></article><article><span>Audience</span><p>{listing.audience || 'Not provided yet.'}</p></article><article><span>Pricing</span><p>{listing.pricing_model || 'Not provided yet.'}</p></article><article><span>Tech stack</span><p>{techStack(listing.tech_stack)}</p></article><article><span>Description</span><p>{listing.description || 'The seller has not added a longer description.'}</p></article><article><span>Assets included</span><p>{listing.assets_included || 'Not provided yet.'}</p></article></div></section>
 			<aside class="contact-panel"><p class="eyebrow">INTERESTED?</p><h2>Make the first move.</h2><p>Buyer onboarding and deal-room conversation happen on the board. No anonymous offers.</p><a class="button yellow full" href="/?intent=offer&listing={listing.id}">Open a deal room</a><small>Offers are negotiated directly. BidLadders does not hold acquisition funds in this MVP.</small></aside>
 		</div>
 

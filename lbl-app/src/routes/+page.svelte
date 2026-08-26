@@ -2,12 +2,12 @@
 	import { onMount } from 'svelte';
 
 	type Role = 'seller' | 'buyer';
-	type User = { id: number; username: string; role: Role; totp_enabled: boolean; profile_image_key?: string | null };
+	type User = { id: number; username: string; role: Role; totp_enabled: boolean; profile_image_key?: string | null; display_name?: string | null; bio?: string | null; website?: string | null; country?: string | null; timezone?: string | null };
 	type Listing = {
 		id: number; name: string; summary: string; description?: string; product_url: string;
 		asking_price: number; mrr: number; mrr_status: string; operating_cost: number;
 		assets_included: string; seller_username: string; rank: number; visible_on_home: boolean;
-		is_sponsored: boolean; paid_bid: number | null; verified_at?: string; seller_profile_image_url?: string; images?: string[];
+		is_sponsored: boolean; paid_bid: number | null; verified_at?: string; seller_profile_image_url?: string; product_icon_url?: string | null; images?: string[];
 		category?: string | null; problem_solved?: string | null; audience?: string | null; pricing_model?: string | null; tech_stack?: string | null;
 		total_revenue?: number | null; last_30d_revenue?: number | null; active_customers?: number | null; growth_percent?: number | null; churn_percent?: number | null;
 		github_url?: string | null; google_analytics_property?: string | null; google_search_console_url?: string | null;
@@ -16,6 +16,10 @@
 	type Message = { id: number; body: string; username: string; created_at: string };
 	type CarouselSlot = { id: number; status: 'available' | 'reserved' | 'paid'; listing?: { name: string; product_url: string; summary: string } | null; expiresAt?: number };
 	type Product = { id: string; name: string; description?: string; prices: { id: string; unit_amount: number; currency: string; recurring?: { interval: string; interval_count: number } }[] };
+	const stripeCreateUrl = 'https://dashboard.stripe.com/apikeys/create?name=BidLadders&permissions%5B%5D=rak_charge_read&permissions%5B%5D=rak_subscription_read&permissions%5B%5D=rak_plan_read&permissions%5B%5D=rak_bucket_connect_read&permissions%5B%5D=rak_file_read&permissions%5B%5D=rak_product_read';
+	const categories = ['AI', 'Developer Tools', 'Productivity', 'Marketing', 'Media', 'E-commerce', 'Education', 'Finance', 'Health', 'Social', 'Consumer', 'Other'];
+	const pricingModels = ['Subscription', 'One-time', 'Usage-based', 'Freemium', 'Advertising', 'Marketplace', 'Other'];
+	const techOptions = ['HTML', 'CSS', 'JavaScript', 'TypeScript', 'Svelte', 'React', 'Vue', 'Node.js', 'Ruby', 'Python', 'Go', 'SQL', 'PostgreSQL', 'SQLite', 'MongoDB', 'Prisma', 'Cloudflare', 'AWS', 'Stripe'];
 
 	let user = $state<User | null>(null);
 	let token = $state('');
@@ -34,6 +38,7 @@
 	let authUsername = $state('');
 	let authPassword = $state('');
 	let profileFile = $state<File | null>(null);
+	let productIconFile = $state<File | null>(null);
 	let formName = $state('');
 	let formUrl = $state('');
 	let formSummary = $state('');
@@ -45,10 +50,13 @@
 	let formPublish = $state(true);
 	let listingFiles = $state<File[]>([]);
 	let formCategory = $state('');
+	let formCategoryOther = $state('');
 	let formProblem = $state('');
 	let formAudience = $state('');
 	let formPricing = $state('');
 	let formTechStack = $state('');
+	let selectedTech = $state<string[]>([]);
+	let formTechOther = $state('');
 	let formTotalRevenue = $state('');
 	let formLast30dRevenue = $state('');
 	let formActiveCustomers = $state('');
@@ -57,6 +65,9 @@
 	let formGithubUrl = $state('');
 	let formGoogleAnalytics = $state('');
 	let formSearchConsole = $state('');
+	let connectGoogleAnalytics = $state(false);
+	let connectSearchConsole = $state(false);
+	let connectGithub = $state(false);
 	let stripeKey = $state('');
 	let stripeProducts = $state<Product[]>([]);
 	let selectedProduct = $state<Product | null>(null);
@@ -101,10 +112,18 @@
 
 	function chooseListingImages(event: Event) {
 		const files = Array.from((event.currentTarget as HTMLInputElement).files || []);
-		if (files.some((file) => file.size > 2 * 1024 * 1024)) { error = 'Each listing image must be 2MB or smaller'; listingFiles = []; return; }
+		if (files.some((file) => file.size > 2 * 1024 * 1024 || !['image/jpeg', 'image/png'].includes(file.type))) { error = 'Each listing image must be PNG or JPG and 2MB or smaller'; listingFiles = []; return; }
 		listingFiles = files.slice(0, 5);
 		if (files.length > 5) notice = 'Only the first five listing images were selected.';
 	}
+
+	function chooseProductIcon(event: Event) {
+		const file = (event.currentTarget as HTMLInputElement).files?.[0] || null;
+		if (file && (file.size > 1024 * 1024 || !['image/jpeg', 'image/png'].includes(file.type))) { error = 'Product icon must be PNG or JPG and 1MB or smaller'; productIconFile = null; return; }
+		productIconFile = file;
+	}
+
+	function toggleTech(value: string) { selectedTech = selectedTech.includes(value) ? selectedTech.filter((item) => item !== value) : [...selectedTech, value]; }
 
 	async function loadListings() {
 		loading = true;
@@ -162,13 +181,16 @@
 
 	async function submitListing() {
 		try {
-			const data = await api('listings', { method: 'POST', body: JSON.stringify({ productUrl: formUrl, name: formName, summary: formSummary, description: formDescription, askingPrice: formPrice, operatingCost: formCosts, assetsIncluded: formAssets, mrrStatus: formMrrStatus, publish: formPublish, category: formCategory, problemSolved: formProblem, audience: formAudience, pricingModel: formPricing, techStack: formTechStack, totalRevenue: formTotalRevenue, last30dRevenue: formLast30dRevenue, activeCustomers: formActiveCustomers, growthPercent: formGrowth, churnPercent: formChurn, githubUrl: formGithubUrl, googleAnalyticsProperty: formGoogleAnalytics, googleSearchConsoleUrl: formSearchConsole }) });
+			const techStack = JSON.stringify([...selectedTech, ...(formTechOther.trim() ? [formTechOther.trim()] : [])]);
+			const category = formCategory === 'Other' ? formCategoryOther.trim() : formCategory;
+			const data = await api('listings', { method: 'POST', body: JSON.stringify({ productUrl: formUrl, name: formName, summary: formSummary, description: formDescription, askingPrice: formPrice, operatingCost: formCosts, assetsIncluded: formAssets, mrrStatus: formMrrStatus, publish: formPublish, category, problemSolved: formProblem, audience: formAudience, pricingModel: formPricing, techStack, totalRevenue: formTotalRevenue, last30dRevenue: formLast30dRevenue, activeCustomers: formActiveCustomers, growthPercent: formGrowth, churnPercent: formChurn, githubUrl: formGithubUrl, googleAnalyticsProperty: formGoogleAnalytics, googleSearchConsoleUrl: formSearchConsole }) });
+			if (productIconFile && data.id) { const iconForm = new FormData(); iconForm.append('icon', productIconFile); await api(`listings/${data.id}/icon`, { method: 'POST', body: iconForm }); }
 			if (listingFiles.length && data.id) {
 				const form = new FormData();
 				for (const file of listingFiles) form.append('images', file);
 				await api(`listings/${data.id}/images`, { method: 'POST', body: form });
 			}
-			listingFiles = [];
+			listingFiles = []; productIconFile = null;
 			modal = null; notice = formPublish ? 'Listing published. Verify its Stripe product to add the MRR signal.' : 'Draft saved.'; await loadListings();
 			if (stripeKey && data.id) { stripeListingId = data.id; modal = 'stripe'; }
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to save listing'; }
@@ -231,6 +253,7 @@
 		<div class="account-actions">
 			{#if user}
 				<span class="user-chip"><img class="user-avatar" src={avatarUrl(user.profile_image_key)} alt="" />@{user.username} <small>{user.role}</small></span>
+				<a class="button ghost" href="/profile">Profile</a>
 				<button class="button ghost" onclick={signOut}>Sign out</button>
 			{:else}
 				<button class="button ghost" onclick={() => { authMode = 'login'; modal = 'auth'; }}>Sign in</button>
@@ -268,7 +291,7 @@
 			{:else}<div class="deal-layout"><div class="deal-list">{#if !deals.length}<div class="empty-state compact"><strong>No deal rooms yet.</strong><span>Buyer offers create the first room.</span></div>{/if}{#each deals as deal}<button class="deal-row" class:selected={selectedDeal?.id === deal.id} onclick={() => openDeal(deal)}><span><strong>{deal.listing_name}</strong><small>{deal.buyer_username} ↔ {deal.seller_username}</small></span><span class="deal-amount">{money(deal.offer)}<small>{deal.status}</small></span></button>{/each}</div><div class="conversation">{#if selectedDeal}<div class="conversation-head"><div><p class="eyebrow">DEAL #{selectedDeal.id}</p><h3>{selectedDeal.listing_name}</h3></div><span class="status-tag">{selectedDeal.status}</span></div><div class="messages">{#each messages as message}<div class:mine={message.username === user.username} class="message"><small>@{message.username} · {new Date(message.created_at).toLocaleString()}</small><p>{message.body}</p></div>{/each}</div><form class="message-box" onsubmit={(event) => { event.preventDefault(); sendMessage(); }}><input bind:value={messageDraft} placeholder="Write a negotiation note..." /><button class="button dark" type="submit">Send</button></form>{:else}<div class="empty-state"><strong>Select a deal room.</strong><span>Offers and replies stay connected to the listing.</span></div>{/if}</div></div>{/if}
 		{:else}
 			<section class="workspace-heading"><div><p class="eyebrow">{view === 'market' ? 'THE FIRST 330' : 'SEARCHABLE ARCHIVE'}</p><h2>{view === 'market' ? 'The board is the product.' : 'Every listing stays discoverable.'}</h2></div><p>{view === 'market' ? 'A paid rank buys visibility for seven days. Free listings still earn their place by being early.' : 'Use the name filter to find listings beyond the homepage board.'}</p></section>
-			{#if loading}<div class="empty-state"><strong>Loading the board...</strong></div>{:else if !listings.length}<div class="empty-state"><strong>No listings match that search.</strong><span>Be the first product on the board.</span>{#if user?.role === 'seller'}<button class="button coral" onclick={() => modal = 'listing'}>List a product</button>{/if}</div>{:else}<div class="ladder-grid"><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER A</span><strong>01—165</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 0) as listing, index}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main">{#if listing.images?.[0]}<img class="listing-thumb" src={listing.images[0]} alt="" />{/if}<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions"><a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER B</span><strong>166—330</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 1) as listing}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main">{#if listing.images?.[0]}<img class="listing-thumb" src={listing.images[0]} alt="" />{/if}<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions"><a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section></div>{/if}
+			{#if loading}<div class="empty-state"><strong>Loading the board...</strong></div>{:else if !listings.length}<div class="empty-state"><strong>No listings match that search.</strong><span>Be the first product on the board.</span>{#if user?.role === 'seller'}<button class="button coral" onclick={() => modal = 'listing'}>List a product</button>{/if}</div>{:else}<div class="ladder-grid"><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER A</span><strong>01—165</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 0) as listing, index}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main">{#if listing.product_icon_url || listing.images?.[0]}<img class="listing-thumb" src={listing.product_icon_url || listing.images?.[0]} alt="" />{/if}<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions"><a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section><section class="ladder"><div class="ladder-head"><span class="ladder-label">LADDER B</span><strong>166—330</strong></div>{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 1) as listing}<article class="listing-row" class:sponsored={listing.is_sponsored}><div class="rank">{String(listing.rank).padStart(3, '0')}</div><div class="listing-main">{#if listing.product_icon_url || listing.images?.[0]}<img class="listing-thumb" src={listing.product_icon_url || listing.images?.[0]} alt="" />{/if}<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={listing.product_url} target="_blank" rel="noreferrer">{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div><p>{listing.summary}</p><div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div></div><div class="row-actions"><a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>{#if user?.role === 'buyer'}<button class="icon-button" title="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}{#if user?.role === 'seller'}<button class="icon-button bid" title="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button>{/if}</div></article>{/each}</section></div>{/if}
 		{/if}
 	</main>
 
@@ -291,15 +314,17 @@
 				<p class="modal-intro">This is a product listing, not an LLC sale. Verified signals are shown only when the seller supplies or confirms them.</p>
 				<div class="field"><label for="form-url">Product URL</label><input id="form-url" bind:value={formUrl} placeholder="https://yourproduct.com" /></div>
 				<div class="field"><label for="form-name">Product name</label><input id="form-name" bind:value={formName} placeholder="Lipstick Digital" /></div>
-				<div class="field"><label for="form-summary">One-line summary</label><input id="form-summary" bind:value={formSummary} placeholder="What does this product do?" /></div>
-				<div class="form-grid"><div class="field"><label for="form-category">Category</label><input id="form-category" bind:value={formCategory} placeholder="Developer tools, media, education..." /></div><div class="field"><label for="form-audience">Audience</label><input id="form-audience" bind:value={formAudience} placeholder="Who uses this product?" /></div><div class="field"><label for="form-pricing">Pricing model</label><input id="form-pricing" bind:value={formPricing} placeholder="Subscription, one-time, usage-based..." /></div><div class="field"><label for="form-tech">Tech stack</label><input id="form-tech" bind:value={formTechStack} placeholder="Svelte, Cloudflare, Stripe..." /></div></div>
+				<div class="field"><label for="form-summary">One-line summary</label><textarea id="form-summary" bind:value={formSummary} rows="3" placeholder="What does this product do?"></textarea></div>
+				<div class="form-grid"><div class="field"><label for="form-category">Category</label><select id="form-category" bind:value={formCategory}><option value="">Choose a category</option>{#each categories as category}<option value={category}>{category}</option>{/each}</select>{#if formCategory === 'Other'}<input bind:value={formCategoryOther} placeholder="Custom category" aria-label="Custom category" />{/if}</div><div class="field"><label for="form-audience">Audience</label><textarea id="form-audience" bind:value={formAudience} rows="3" placeholder="Who uses this product and why?"></textarea></div><div class="field"><label for="form-pricing">Pricing model</label><select id="form-pricing" bind:value={formPricing}><option value="">Choose a pricing model</option>{#each pricingModels as pricing}<option value={pricing}>{pricing}</option>{/each}</select></div><div class="field"><span class="field-label">Tech stack</span><div class="tech-picker">{#each techOptions as tech}<button type="button" class:chosen={selectedTech.includes(tech)} onclick={() => toggleTech(tech)}>{tech}</button>{/each}</div><input id="form-tech-other" bind:value={formTechOther} placeholder="Other technology" aria-label="Other technology" /></div></div>
 				<div class="field"><label for="form-problem">Problem solved</label><textarea id="form-problem" bind:value={formProblem} rows="2" placeholder="What painful job does this product solve?"></textarea></div>
 				<div class="field"><label for="form-description">Description {formMrrStatus === 'zero' ? '(required for $0 MRR)' : '(optional)'}</label><textarea id="form-description" bind:value={formDescription} rows="4" placeholder="Customers, distribution, stack, constraints, and what transfers..."></textarea></div>
+				<div class="field"><label for="form-assets">Assets included</label><textarea id="form-assets" bind:value={formAssets} rows="4" placeholder="Code, domain, design files, documentation, customer list, social accounts, or other transfer items."></textarea></div>
+				<div class="field"><label for="form-mrr-status">MRR status</label><select id="form-mrr-status" bind:value={formMrrStatus}><option value="unknown">Not verified</option><option value="zero">$0 MRR</option><option value="verified">Verified after Stripe confirmation</option></select></div>
 				<div class="form-grid"><div class="field"><label for="form-price">Asking price (USD)</label><input id="form-price" type="number" bind:value={formPrice} min="0" /></div><div class="field"><label for="form-costs">Monthly operating cost</label><input id="form-costs" type="number" bind:value={formCosts} min="0" /></div></div>
 				<div class="field"><span class="field-label">Revenue context (optional)</span><div class="form-grid"><input type="number" bind:value={formTotalRevenue} min="0" placeholder="All-time revenue" aria-label="All-time revenue" /><input type="number" bind:value={formLast30dRevenue} min="0" placeholder="Last 30 days revenue" aria-label="Last 30 days revenue" /><input type="number" bind:value={formActiveCustomers} min="0" placeholder="Active customers" aria-label="Active customers" /><input type="number" bind:value={formGrowth} placeholder="Growth % (30d)" aria-label="Growth percent over 30 days" /></div></div>
-				<div class="provider-grid"><div class="provider-card"><span><strong>Google Analytics</strong><small>Optional property ID</small></span><input bind:value={formGoogleAnalytics} placeholder="G-XXXXXXXXXX" aria-label="Google Analytics property ID" /></div><div class="provider-card"><span><strong>Google Search Console</strong><small>Optional property URL</small></span><input bind:value={formSearchConsole} placeholder="https://yourproduct.com" aria-label="Google Search Console property URL" /></div><div class="provider-card"><span><strong>GitHub activity</strong><small>Optional public repository</small></span><input bind:value={formGithubUrl} placeholder="https://github.com/org/repo" aria-label="GitHub repository URL" /></div></div>
-				<div class="field stripe-key-row"><label for="stripe-key">Restricted Stripe key (optional)</label><div class="input-action"><input id="stripe-key" type="password" bind:value={stripeKey} placeholder="rk_test_..." /><a class="icon-button" href="https://dashboard.stripe.com/apikeys" target="_blank" rel="noreferrer" title="Open Stripe API keys in a new tab" aria-label="Open Stripe API keys in a new tab">↗</a></div><small class="field-help">Open Stripe in a new tab to create a restricted read-only key. BidLadders searches only the product you confirm.</small></div>
-				<div class="field"><label for="listing-images">Product images (optional, 0–5; max 2MB each)</label><input id="listing-images" type="file" multiple accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseListingImages} />{#if listingFiles.length}<small class="file-note">{listingFiles.length} image{listingFiles.length === 1 ? '' : 's'} selected</small>{/if}</div>
+				<div class="provider-grid"><div class="provider-card"><label class="check-row"><input type="checkbox" bind:checked={connectGoogleAnalytics} /><strong>Google Analytics</strong></label><small>Optional property ID</small>{#if connectGoogleAnalytics}<input bind:value={formGoogleAnalytics} placeholder="G-XXXXXXXXXX" aria-label="Google Analytics property ID" />{:else}<small class="provider-off">Not connected · skipped</small>{/if}</div><div class="provider-card"><label class="check-row"><input type="checkbox" bind:checked={connectSearchConsole} /><strong>Google Search Console</strong></label><small>Optional property URL</small>{#if connectSearchConsole}<input bind:value={formSearchConsole} placeholder="https://yourproduct.com" aria-label="Google Search Console property URL" />{:else}<small class="provider-off">Not connected · skipped</small>{/if}</div><div class="provider-card"><label class="check-row"><input type="checkbox" bind:checked={connectGithub} /><strong>GitHub activity</strong></label><small>Optional public repository</small>{#if connectGithub}<input bind:value={formGithubUrl} placeholder="https://github.com/org/repo" aria-label="GitHub repository URL" />{:else}<small class="provider-off">Not connected · skipped</small>{/if}</div></div>
+				<div class="field stripe-key-row"><label for="stripe-key">Restricted Stripe key (optional)</label><div class="input-action"><input id="stripe-key" type="password" bind:value={stripeKey} placeholder="rk_test_..." /><a class="icon-button" href={stripeCreateUrl} target="_blank" rel="noreferrer" title="Open the prefilled Stripe restricted-key form in a new tab" aria-label="Open the prefilled Stripe restricted-key form in a new tab">↗</a></div><small class="field-help">Optional. Open the prefilled Stripe form in a new tab; BidLadders searches only the product you confirm.</small></div>
+				<div class="media-upload-grid"><div class="field"><label for="product-icon">Product icon (optional, PNG/JPG, max 1MB)</label><input id="product-icon" type="file" accept="image/jpeg,image/png" onchange={chooseProductIcon} />{#if productIconFile}<small class="file-note">Icon selected: {productIconFile.name}</small>{/if}</div><div class="field"><label for="listing-images">Product images (optional, PNG/JPG, 0–5; max 2MB each)</label><input id="listing-images" type="file" multiple accept="image/jpeg,image/png" onchange={chooseListingImages} />{#if listingFiles.length}<small class="file-note">{listingFiles.length} image{listingFiles.length === 1 ? '' : 's'} selected</small>{/if}</div></div>
 				<div class="field check-row"><input id="publish" type="checkbox" bind:checked={formPublish} /><label for="publish">Publish immediately</label></div>
 				<button class="button coral full" onclick={submitListing}>Save listing</button>
 			{:else if modal === 'stripe'}

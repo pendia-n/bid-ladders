@@ -1,0 +1,6 @@
+ALTER TABLE users ADD COLUMN display_name TEXT;
+ALTER TABLE users ADD COLUMN bio TEXT;
+ALTER TABLE users ADD COLUMN website TEXT;
+ALTER TABLE users ADD COLUMN country TEXT;
+ALTER TABLE users ADD COLUMN timezone TEXT;
+ALTER TABLE listings ADD COLUMN product_icon_key TEXT;

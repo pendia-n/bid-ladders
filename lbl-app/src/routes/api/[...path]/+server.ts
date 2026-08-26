@@ -34,10 +34,10 @@ function extensionFor(type: string) {
 	return ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' } as Record<string, string>)[type] || 'bin';
 }
 
-function validateImage(file: FormDataEntryValue | null, label: string) {
+function validateImage(file: FormDataEntryValue | null, label: string, types = IMAGE_TYPES) {
 	if (!(file instanceof File) || !file.size) throw new Error(`${label} is required`);
 	if (file.size > MAX_IMAGE_BYTES) throw new Error(`${label} must be 2MB or smaller`);
-	if (!IMAGE_TYPES.has(file.type)) throw new Error(`${label} must be JPEG, PNG, WebP, or GIF`);
+	if (!types.has(file.type)) throw new Error(`${label} must be ${types === IMAGE_TYPES ? 'JPEG, PNG, WebP, or GIF' : 'JPEG or PNG'}`);
 	return file;
 }
 
@@ -73,7 +73,7 @@ async function carouselRequest(event: RequestEvent, slotId: number, path: string
 
 function normalized(value: string) { return value.trim().toLowerCase().replace(/\s+/g, ' '); }
 
-type ListingRow = { id: number; seller_id: number; product_url: string; name: string; summary: string; description: string | null; asking_price_cents: number; mrr_cents: number; mrr_status: string; verified_at: string | null; operating_cost_cents: number; assets_included: string; created_at: string; seller_username: string; seller_profile_image_key: string | null; category: string | null; problem_solved: string | null; audience: string | null; pricing_model: string | null; tech_stack: string | null; total_revenue_cents: number | null; last_30d_revenue_cents: number | null; active_customers: number | null; growth_percent: number | null; churn_percent: number | null; github_url: string | null; google_analytics_property: string | null; google_search_console_url: string | null };
+type ListingRow = { id: number; seller_id: number; product_url: string; name: string; summary: string; description: string | null; asking_price_cents: number; mrr_cents: number; mrr_status: string; verified_at: string | null; operating_cost_cents: number; assets_included: string; product_icon_key: string | null; created_at: string; seller_username: string; seller_profile_image_key: string | null; category: string | null; problem_solved: string | null; audience: string | null; pricing_model: string | null; tech_stack: string | null; total_revenue_cents: number | null; last_30d_revenue_cents: number | null; active_customers: number | null; growth_percent: number | null; churn_percent: number | null; github_url: string | null; google_analytics_property: string | null; google_search_console_url: string | null };
 type BidRow = { id: number; listing_id: number; amount_cents: number; paid_at: string; expires_at: string };
 
 async function loadRankedListings(event: RequestEvent, query = '') {
@@ -81,7 +81,7 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 	const search = normalized(query);
 	const filter = search ? 'AND (LOWER(l.name) LIKE ? OR LOWER(l.summary) LIKE ?)' : '';
 	const args = search ? [`%${search}%`, `%${search}%`] : [];
-	const listingRows = await db.prepare(`SELECT l.id, l.seller_id, l.product_url, l.name, l.summary, l.description, l.asking_price_cents, l.mrr_cents, l.mrr_status, l.verified_at, l.operating_cost_cents, l.assets_included, l.created_at, u.username AS seller_username, u.profile_image_key AS seller_profile_image_key, d.category, d.problem_solved, d.audience, d.pricing_model, d.tech_stack, d.total_revenue_cents, d.last_30d_revenue_cents, d.active_customers, d.growth_percent, d.churn_percent, d.github_url, d.google_analytics_property, d.google_search_console_url FROM listings l JOIN users u ON u.id = l.seller_id LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.status = 'published' ${filter}`).bind(...args).all<ListingRow>();
+	const listingRows = await db.prepare(`SELECT l.id, l.seller_id, l.product_url, l.name, l.summary, l.description, l.asking_price_cents, l.mrr_cents, l.mrr_status, l.verified_at, l.operating_cost_cents, l.assets_included, l.product_icon_key, l.created_at, u.username AS seller_username, u.profile_image_key AS seller_profile_image_key, d.category, d.problem_solved, d.audience, d.pricing_model, d.tech_stack, d.total_revenue_cents, d.last_30d_revenue_cents, d.active_customers, d.growth_percent, d.churn_percent, d.github_url, d.google_analytics_property, d.google_search_console_url FROM listings l JOIN users u ON u.id = l.seller_id LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.status = 'published' ${filter}`).bind(...args).all<ListingRow>();
 	const bidRows = await db.prepare(`SELECT id, listing_id, amount_cents, paid_at, expires_at FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC`).bind(now()).all<BidRow>();
 	const imageRows = await db.prepare('SELECT listing_id, object_key, sort_order FROM listing_images ORDER BY sort_order ASC, id ASC').all<{ listing_id: number; object_key: string; sort_order: number }>();
 	const imagesByListing = new Map<number, string[]>();
@@ -101,6 +101,7 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 		total_revenue: listing.total_revenue_cents == null ? null : Number(listing.total_revenue_cents) / 100,
 		last_30d_revenue: listing.last_30d_revenue_cents == null ? null : Number(listing.last_30d_revenue_cents) / 100,
 		seller_profile_image_url: mediaUrl(listing.seller_profile_image_key || ''),
+		product_icon_url: listing.product_icon_key ? mediaUrl(listing.product_icon_key) : null,
 		images: imagesByListing.get(listing.id) || [],
 		paid_bid: bestBid.has(listing.id) ? Number(bestBid.get(listing.id)!.amount_cents) / 100 : null,
 		rank: index + 1,
@@ -156,7 +157,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 
 	if (route === 'media' && method === 'GET') {
 		const key = event.url.searchParams.get('key') || '';
-		if (!/^(profiles|listings)\/[A-Za-z0-9._-]+\/(?:[A-Za-z0-9-]+)\.(?:jpg|png|webp|gif)$/.test(key)) return new Response('Not found', { status: 404 });
+		if (!/^(profiles|listings|listing-icons)\/[A-Za-z0-9._-]+\/(?:[A-Za-z0-9-]+)\.(?:jpg|png|webp|gif)$/.test(key)) return new Response('Not found', { status: 404 });
 		const object = await mediaBucket(event).get(key);
 		if (!object) return new Response('Not found', { status: 404 });
 		return new Response(await object.arrayBuffer(), { headers: { 'content-type': object.httpMetadata?.contentType || 'application/octet-stream', 'cache-control': object.httpMetadata?.cacheControl || 'public, max-age=3600' } });
@@ -173,6 +174,29 @@ async function handle(event: RequestEvent): Promise<Response> {
 			if (old?.profile_image_key) await mediaBucket(event).delete(old.profile_image_key);
 			return json({ ok: true, profileImageUrl: mediaUrl(key) });
 		} catch (error: any) { return json({ error: error?.message || 'Profile image upload failed' }, 400); }
+	}
+
+	if (segments[0] === 'profile' && !segments[1] && method === 'GET') {
+		const user = await requireUser(event);
+		const buyer = user.role === 'buyer' ? await getDb(event).prepare('SELECT legal_name, company_name, role_title, country, timezone, budget_range, purchase_entity FROM buyer_profiles WHERE user_id = ?').bind(user.id).first<any>() : null;
+		return json({ profile: { ...user, buyer } });
+	}
+
+	if (segments[0] === 'profile' && !segments[1] && method === 'PATCH') {
+		const user = await requireUser(event); const input = await body(event);
+		const displayName = String(input.displayName || '').trim().slice(0, 80);
+		const bio = String(input.bio || '').trim().slice(0, 2000);
+		const website = String(input.website || '').trim().slice(0, 500);
+		const country = String(input.country || '').trim().slice(0, 120);
+		const timezone = String(input.timezone || '').trim().slice(0, 120);
+		await getDb(event).prepare('UPDATE users SET display_name = ?, bio = ?, website = ?, country = ?, timezone = ? WHERE id = ?').bind(displayName || null, bio || null, website || null, country || null, timezone || null, user.id).run();
+		if (user.role === 'buyer') {
+			const buyer = input.buyer || {};
+			if (String(buyer.legalName || '').trim() && String(buyer.roleTitle || '').trim() && String(buyer.country || '').trim() && String(buyer.timezone || '').trim() && String(buyer.budgetRange || '').trim() && ['personal', 'company'].includes(buyer.purchaseEntity)) {
+				await getDb(event).prepare('INSERT INTO buyer_profiles (user_id, legal_name, company_name, role_title, country, timezone, budget_range, purchase_entity, terms_accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET legal_name=excluded.legal_name, company_name=excluded.company_name, role_title=excluded.role_title, country=excluded.country, timezone=excluded.timezone, budget_range=excluded.budget_range, purchase_entity=excluded.purchase_entity, terms_accepted_at=excluded.terms_accepted_at').bind(user.id, buyer.legalName, buyer.companyName || null, buyer.roleTitle, buyer.country, buyer.timezone, buyer.budgetRange, buyer.purchaseEntity, now()).run();
+			}
+		}
+		return json({ ok: true });
 	}
 
 	if (route === 'auth/signup' && method === 'POST') {
@@ -295,12 +319,27 @@ async function handle(event: RequestEvent): Promise<Response> {
 			const files = form.getAll('images').filter((value): value is File => value instanceof File).slice(0, remaining);
 			if (!files.length) return json({ error: 'Select at least one image' }, 400);
 			for (const [index, file] of files.entries()) {
-				validateImage(file, `Listing image ${index + 1}`);
+				validateImage(file, `Listing image ${index + 1}`, new Set(['image/jpeg', 'image/png']));
 				const key = await putImage(event, file, `listings/${listingId}`);
 				await getDb(event).prepare('INSERT INTO listing_images (listing_id, object_key, mime_type, sort_order) VALUES (?, ?, ?, ?)').bind(listingId, key, file.type, Number(existing?.count || 0) + index).run();
 			}
 			return json({ ok: true, uploaded: files.length });
 		} catch (error: any) { return json({ error: error?.message || 'Listing image upload failed' }, 400); }
+	}
+
+	if (segments[0] === 'listings' && segments[2] === 'icon' && method === 'POST') {
+		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError;
+		const listingId = Number(segments[1]);
+		const listing = await getDb(event).prepare('SELECT id, product_icon_key FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number; product_icon_key: string | null }>();
+		if (!listing) return json({ error: 'Listing not found' }, 404);
+		try {
+			const form = await event.request.formData(); const file = validateImage(form.get('icon'), 'Product icon', new Set(['image/jpeg', 'image/png']));
+			if (file.size > 1024 * 1024) throw new Error('Product icon must be 1MB or smaller');
+			const key = await putImage(event, file, `listing-icons/${listingId}`);
+			await getDb(event).prepare('UPDATE listings SET product_icon_key = ?, updated_at = ? WHERE id = ?').bind(key, now(), listingId).run();
+			if (listing.product_icon_key) await mediaBucket(event).delete(listing.product_icon_key);
+			return json({ ok: true, productIconUrl: mediaUrl(key) });
+		} catch (error: any) { return json({ error: error?.message || 'Product icon upload failed' }, 400); }
 	}
 
 	if (segments[0] === 'stripe' && segments[1] === 'search' && method === 'POST') {
@@ -401,3 +440,4 @@ async function safeHandle(event: RequestEvent) {
 
 export const GET = safeHandle;
 export const POST = safeHandle;
+export const PATCH = safeHandle;

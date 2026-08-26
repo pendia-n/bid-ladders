@@ -23,6 +23,11 @@ export type AuthUser = {
 	role: Role;
 	totp_enabled: number;
 	profile_image_key?: string | null;
+	display_name?: string | null;
+	bio?: string | null;
+	website?: string | null;
+	country?: string | null;
+	timezone?: string | null;
 };
 
 export function envFrom(event: RequestEvent): EnvBindings {
@@ -55,7 +60,7 @@ export async function userFromToken(event: RequestEvent): Promise<AuthUser | nul
 	try {
 		const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(encodedPayload))) as { sub: number; exp: number };
 		if (!payload.sub || payload.exp < Math.floor(Date.now() / 1000)) return null;
-		const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key FROM users WHERE id = ?').bind(payload.sub).first<AuthUser>();
+		const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key, display_name, bio, website, country, timezone FROM users WHERE id = ?').bind(payload.sub).first<AuthUser>();
 		return user ?? null;
 	} catch {
 		return null;
@@ -74,7 +79,7 @@ export async function registerUser(event: RequestEvent, username: string, passwo
 	if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) throw new Error('Password must be 12+ characters with upper, lower, and number characters');
 	const passwordData = await hashPassword(password);
 	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role) VALUES (?, ?, ?, ?, ?)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role).run();
-	const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key FROM users WHERE id = ?').bind(result.meta.last_row_id).first<AuthUser>();
+	const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key, display_name, bio, website, country, timezone FROM users WHERE id = ?').bind(result.meta.last_row_id).first<AuthUser>();
 	if (!user) throw new Error('Unable to create account');
 	return { user, token: await createToken(event, user) };
 }
@@ -82,7 +87,7 @@ export async function registerUser(event: RequestEvent, username: string, passwo
 export async function loginUser(event: RequestEvent, username: string, password: string) {
 	const userRecord = await getDb(event).prepare('SELECT * FROM users WHERE username = ?').bind(username.trim().toLowerCase()).first<any>();
 	if (!userRecord || !(await verifyPassword(password, userRecord.password_hash, userRecord.password_salt, userRecord.password_iterations))) throw new Error('Invalid username or password');
-	const user: AuthUser = { id: userRecord.id, username: userRecord.username, role: userRecord.role, totp_enabled: userRecord.totp_enabled, profile_image_key: userRecord.profile_image_key };
+	const user: AuthUser = { id: userRecord.id, username: userRecord.username, role: userRecord.role, totp_enabled: userRecord.totp_enabled, profile_image_key: userRecord.profile_image_key, display_name: userRecord.display_name, bio: userRecord.bio, website: userRecord.website, country: userRecord.country, timezone: userRecord.timezone };
 	return { user, token: await createToken(event, user) };
 }
 
