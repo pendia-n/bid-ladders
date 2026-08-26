@@ -195,7 +195,7 @@ async function matchingStripeProducts(key: string, name: string) {
 	for (const price of allPrices.flat()) pricesByProduct.set(String(price.product), [...(pricesByProduct.get(String(price.product)) || []), price]);
 	return Promise.all(products.filter((product: any) => {
 		const prices = pricesByProduct.get(String(product.id)) || [];
-		return tokenMatch(name, [product.name, product.description, ...prices.flatMap((price) => [price.nickname, price.lookup_key, JSON.stringify(price.metadata || {})])]);
+		return tokenMatch(name, [product.name, product.description, ...prices.flatMap((price) => [price.name, price.description, price.nickname, price.lookup_key, JSON.stringify(price.metadata || {})])]);
 	}).slice(0, 10).map(async (product: any) => {
 		const prices = pricesByProduct.get(String(product.id)) || await stripePricesForProduct(key, product.id);
 		return { id: product.id, name: product.name, description: product.description, prices: prices.map((price: any) => ({ id: price.id, active: price.active, unit_amount: price.unit_amount, currency: price.currency, recurring: price.recurring })) };
