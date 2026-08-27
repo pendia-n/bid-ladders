@@ -1,6 +1,7 @@
 import type { RequestEvent } from '@sveltejs/kit';
 import { decryptText, encryptText, verifyTotp } from '$lib/server/crypto';
 import { envFrom, getDb, loginUser, registerUser, requireUser, userFromToken, verifyUserTotp, type AuthUser } from '$lib/server/auth';
+import { createEscrowTransaction, platformFeeForAmount } from '$lib/server/escrow';
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const now = () => new Date().toISOString();
@@ -64,7 +65,7 @@ async function stripePost(key: string, path: string, params: URLSearchParams) {
 async function stripeListAll(key: string, endpoint: string, params: Record<string, string> = {}) {
 	const items: any[] = [];
 	let startingAfter = '';
-	for (let page = 0; page < 10; page += 1) {
+	for (let page = 0; page < 50; page += 1) {
 		const query = new URLSearchParams({ ...params, limit: '100' });
 		if (startingAfter) query.set('starting_after', startingAfter);
 		const result = await stripeGet(key, `${endpoint}?${query.toString()}`);
@@ -74,6 +75,16 @@ async function stripeListAll(key: string, endpoint: string, params: Record<strin
 		if (!startingAfter) break;
 	}
 	return items;
+}
+
+async function stripeInvoiceLines(key: string, invoiceId: string, expandedLines: any[] = []) {
+	try { return await stripeListAll(key, `invoices/${encodeURIComponent(invoiceId)}/lines`); }
+	catch { return expandedLines; }
+}
+
+async function stripeCheckoutLineItems(key: string, sessionId: string, expandedLines: any[] = []) {
+	try { return await stripeListAll(key, `checkout/sessions/${encodeURIComponent(sessionId)}/line_items`); }
+	catch { return expandedLines; }
 }
 
 async function stripePricesForProduct(key: string, productId: string) {
@@ -250,20 +261,22 @@ async function calculateStripeMetrics(key: string, priceIds: string[]) {
 	};
 
 	try {
-		const invoices = await stripeListAll(key, 'invoices', { status: 'paid', 'expand[]': 'data.lines' });
+		const invoices = await stripeListAll(key, 'invoices', { status: 'paid' });
 		for (const invoice of invoices) {
 			const timestamp = invoice.status_transitions?.paid_at || invoice.created;
-			for (const line of invoice.lines?.data ?? []) addRevenue(line.amount, timestamp, line.price?.id, line.currency);
+			const lines = await stripeInvoiceLines(key, String(invoice.id), invoice.lines?.data ?? []);
+			for (const line of lines) addRevenue(line.amount, timestamp, line.price?.id, line.currency);
 		}
 	} catch {
 		// Some restricted keys omit invoice read access; MRR remains verifiable.
 	}
 
 	try {
-		const sessions = await stripeListAll(key, 'checkout/sessions', { status: 'complete', 'expand[]': 'data.line_items' });
+		const sessions = await stripeListAll(key, 'checkout/sessions', { status: 'complete' });
 		for (const session of sessions) {
 			if (session.mode !== 'payment' || session.payment_status !== 'paid') continue;
-			for (const line of session.line_items?.data ?? []) addRevenue(line.amount_total ?? line.amount_subtotal, session.created, line.price?.id, line.currency);
+			const lines = await stripeCheckoutLineItems(key, String(session.id), session.line_items?.data ?? []);
+			for (const line of lines) addRevenue(line.amount_total ?? line.amount_subtotal ?? line.amount, session.created, line.price?.id, line.currency);
 		}
 	} catch {
 		// One-time Checkout attribution is optional when the key lacks Checkout access.
@@ -313,7 +326,9 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const website = String(input.website || '').trim().slice(0, 500);
 		const country = String(input.country || '').trim().slice(0, 120);
 		const timezone = String(input.timezone || '').trim().slice(0, 120);
-		await getDb(event).prepare('UPDATE users SET display_name = ?, bio = ?, website = ?, country = ?, timezone = ? WHERE id = ?').bind(displayName || null, bio || null, website || null, country || null, timezone || null, user.id).run();
+		const contactEmail = String(input.contactEmail || '').trim().slice(0, 254);
+		if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) return json({ error: 'Enter a valid contact email' }, 400);
+		await getDb(event).prepare('UPDATE users SET display_name = ?, bio = ?, website = ?, country = ?, timezone = ?, contact_email = ? WHERE id = ?').bind(displayName || null, bio || null, website || null, country || null, timezone || null, contactEmail || null, user.id).run();
 		if (user.role === 'buyer') {
 			const buyer = input.buyer || {};
 			if (String(buyer.legalName || '').trim() && String(buyer.roleTitle || '').trim() && String(buyer.country || '').trim() && String(buyer.timezone || '').trim() && String(buyer.budgetRange || '').trim() && ['personal', 'company'].includes(buyer.purchaseEntity)) {
@@ -573,7 +588,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 	}
 
 	if (route === 'deals' && method === 'GET') {
-		const user = await requireUser(event); const result = await getDb(event).prepare('SELECT d.id, d.status, d.offer_cents, d.created_at, d.updated_at, l.id AS listing_id, l.name AS listing_name, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.buyer_id = ? OR d.seller_id = ? ORDER BY d.updated_at DESC').bind(user.id, user.id).all<any>();
+		const user = await requireUser(event); const result = await getDb(event).prepare('SELECT d.id, d.buyer_id, d.seller_id, d.status, d.offer_cents, d.escrow_provider, d.escrow_transaction_id, d.escrow_status, d.created_at, d.updated_at, l.id AS listing_id, l.name AS listing_name, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.buyer_id = ? OR d.seller_id = ? ORDER BY d.updated_at DESC').bind(user.id, user.id).all<any>();
 		return json({ deals: (result.results ?? []).map((deal: any) => ({ ...deal, offer: deal.offer_cents / 100 })) });
 	}
 
@@ -589,6 +604,33 @@ async function handle(event: RequestEvent): Promise<Response> {
 	if (segments[0] === 'deals' && segments[1] && !segments[2] && method === 'GET') {
 		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT d.*, l.name AS listing_name, l.product_url, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.id = ? AND (d.buyer_id = ? OR d.seller_id = ?)').bind(Number(segments[1]), user.id, user.id).first<any>();
 		return deal ? json({ deal: { ...deal, offer: deal.offer_cents / 100 } }) : json({ error: 'Deal not found' }, 404);
+	}
+
+	if (segments[0] === 'deals' && segments[1] && segments[2] === 'accept' && method === 'POST') {
+		const user = await requireUser(event);
+		const deal = await getDb(event).prepare("SELECT id, seller_id, status FROM deals WHERE id = ? AND seller_id = ?").bind(Number(segments[1]), user.id).first<{ id: number; seller_id: number; status: string }>();
+		if (!deal) return json({ error: 'Deal not found' }, 404);
+		if (!['inquiry', 'negotiating'].includes(deal.status)) return json({ error: 'Only an open deal can be accepted' }, 409);
+		await getDb(event).prepare("UPDATE deals SET status = 'accepted', updated_at = ? WHERE id = ? AND seller_id = ?").bind(now(), deal.id, user.id).run();
+		await audit(event, user.id, 'deal.accepted', 'deal', String(deal.id));
+		return json({ ok: true, status: 'accepted' });
+	}
+
+	if (segments[0] === 'deals' && segments[1] && segments[2] === 'escrow' && method === 'POST') {
+		const user = await requireUser(event);
+		const deal = await getDb(event).prepare("SELECT d.*, l.name AS listing_name, l.product_url, buyer.contact_email AS buyer_email, seller.contact_email AS seller_email FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.id = ? AND (d.buyer_id = ? OR d.seller_id = ?)").bind(Number(segments[1]), user.id, user.id).first<any>();
+		if (!deal) return json({ error: 'Deal not found' }, 404);
+		if (deal.status !== 'accepted') return json({ error: 'The seller must accept the deal before escrow can start' }, 409);
+		if (deal.escrow_transaction_id) return json({ escrow: { provider: deal.escrow_provider, transactionId: deal.escrow_transaction_id, status: deal.escrow_status, url: deal.escrow_url } });
+		if (!deal.buyer_email || !deal.seller_email) return json({ error: 'Both buyer and seller must add an escrow contact email in Profile' }, 400);
+		const amountCents = Math.max(1, Number(deal.offer_cents));
+		const escrow = await createEscrowTransaction(event, { buyerEmail: deal.buyer_email, sellerEmail: deal.seller_email, title: deal.listing_name, description: `Product acquisition for ${deal.listing_name}`, merchantUrl: `${envFrom(event).APP_URL || event.url.origin}/product/${deal.listing_id}`, amountCents, platformFeeCents: platformFeeForAmount(amountCents) });
+		const transactionId = String(escrow.id || '');
+		if (!transactionId) throw new Error('Escrow.com did not return a transaction id');
+		const updatedAt = now();
+		await getDb(event).prepare("UPDATE deals SET escrow_provider = 'escrow.com', escrow_transaction_id = ?, escrow_status = 'created', escrow_updated_at = ?, updated_at = ? WHERE id = ? AND escrow_transaction_id IS NULL").bind(transactionId, updatedAt, updatedAt, deal.id).run();
+		await audit(event, user.id, 'deal.escrow_created', 'deal', String(deal.id), { provider: 'escrow.com', transactionId, amountCents, platformFeeCents: platformFeeForAmount(amountCents) });
+		return json({ escrow: { provider: 'escrow.com', transactionId, status: 'created', url: null } });
 	}
 
 	if (segments[0] === 'deals' && segments[1] && segments[2] === 'messages' && method === 'GET') {

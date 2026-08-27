@@ -10,8 +10,17 @@
 	let copied = $state(false);
 	let githubActivity = $state<any>(null);
 	let githubLoading = $state(false);
+	let viewer = $state<{ id: number; role: 'seller' | 'buyer' } | null>(null);
+
+	async function loadViewer() {
+		const token = localStorage.getItem('lbl-token');
+		if (!token) return;
+		const response = await fetch('/api/auth/me', { headers: { authorization: `Bearer ${token}` } });
+		if (response.ok) viewer = (await response.json()).user;
+	}
 
 	onMount(async () => {
+		await loadViewer();
 		if (!listing?.github_url) return;
 		githubLoading = true;
 		try { const response = await fetch(`/api/listings/${encodeURIComponent(listing.id)}/github`); if (response.ok) githubActivity = (await response.json()).activity; } finally { githubLoading = false; }
@@ -41,20 +50,20 @@
 		</header>
 
 		<section class="detail-metrics" aria-label="Verified product metrics">
-			<article class="detail-metric"><span>All-time revenue</span><strong>{money(listing.total_revenue)}</strong><small>{listing.total_revenue == null ? 'Seller has not supplied this metric' : 'Seller-provided context'}</small></article>
+				<article class="detail-metric"><span>All-time revenue</span><strong>{money(listing.total_revenue)}</strong><small>{listing.total_revenue == null ? 'No readable Stripe revenue attached' : listing.mrr_status === 'verified' ? 'Attributed to the verified Stripe product family' : 'Seller-provided context'}</small></article>
 			<article class="detail-metric"><span>MRR</span><strong>{money(listing.mrr)}</strong><small>{listing.mrr_status === 'verified' ? 'Verified from seller-confirmed Stripe prices' : listing.mrr_status === 'zero' ? '$0 MRR stated by seller' : 'Not verified'}</small></article>
 			<article class="detail-metric"><span>Asking price</span><strong>{money(listing.asking_price)}</strong><small>Product-level listing, not an LLC sale</small></article>
 			<article class="detail-metric"><span>Operating cost</span><strong>{money(listing.operating_cost)}</strong><small>Monthly figure supplied by seller</small></article>
 		</section>
 
 		<section class="revenue-panel">
-			<div class="panel-heading"><div><p class="eyebrow">REVENUE SIGNAL</p><h2>{money(listing.last_30d_revenue)} <small>{percent(listing.growth_percent)} vs. prior period</small></h2></div><span class="period-chip">Last 30 days</span></div>
-			{#if listing.last_30d_revenue != null}<div class="bar-chart" aria-label="Last 30 days revenue supplied by seller"><span style="height: 35%"></span><span style="height: 56%"></span><span style="height: 42%"></span><span style="height: 72%"></span><span style="height: 61%"></span><span style="height: 86%"></span><span style="height: 68%"></span><span style="height: 92%"></span><span style="height: 75%"></span><span style="height: 64%"></span><span style="height: 78%"></span><span style="height: 48%"></span></div><div class="chart-axis"><span>30 days ago</span><span>Today</span></div>{:else}<div class="chart-empty"><strong>No revenue history attached yet.</strong><span>Connect a provider or add a seller-supplied snapshot to show this chart.</span></div>{/if}
+				<div class="panel-heading"><div><p class="eyebrow">REVENUE SIGNAL</p><h2>{money(listing.last_30d_revenue)} <small>{percent(listing.growth_percent)} vs. prior period</small></h2></div><span class="period-chip">Rolling 30 days</span></div>
+				{#if listing.last_30d_revenue == null}<div class="chart-empty"><strong>No revenue history attached yet.</strong><span>Connect Stripe and verify the product family to attach a revenue total.</span></div>{:else if listing.last_30d_revenue === 0}<div class="chart-empty"><strong>$0 in paid revenue in the last 30 days.</strong><span>Stripe reported no paid revenue for the verified Price set in this period.</span></div>{:else}<div class="chart-empty"><strong>{money(listing.last_30d_revenue)} in the last 30 days.</strong><span>A daily series is not stored yet, so no invented bars are shown.</span></div>{/if}
 		</section>
 
 		<div class="detail-columns">
 			<section class="insights-section"><div class="panel-heading"><div><p class="eyebrow">PRODUCT INSIGHTS</p><h2>Context before contact.</h2></div></div><div class="insight-grid"><article><span>Problem solved</span><p>{listing.problem_solved || 'Not provided yet.'}</p></article><article><span>Audience</span><p>{listing.audience || 'Not provided yet.'}</p></article><article><span>Pricing</span><p>{listing.pricing_model || 'Not provided yet.'}</p></article><article><span>Tech stack</span><p>{techStack(listing.tech_stack)}</p></article><article><span>Description</span><p>{listing.description || 'The seller has not added a longer description.'}</p></article><article><span>Assets included</span><p>{listing.assets_included || 'Not provided yet.'}</p></article></div></section>
-			<aside class="contact-panel"><p class="eyebrow">INTERESTED?</p><h2>Make the first move.</h2><p>Buyer onboarding and deal-room conversation happen on the board. No anonymous offers.</p><a class="button yellow full" href="/?intent=offer&listing={listing.id}">Open a deal room</a><small>Offers are negotiated directly. BidLadders does not hold acquisition funds in this MVP.</small></aside>
+				<aside class="contact-panel"><p class="eyebrow">INTERESTED?</p><h2>Make the first move.</h2><p>Buyer onboarding and deal-room conversation happen on the board. No anonymous offers.</p>{#if viewer?.role === 'buyer' && viewer.id !== listing.seller_id}<a class="button yellow full" href="/?intent=offer&listing={listing.id}">Open a deal room</a>{:else if viewer?.id === listing.seller_id}<small>You are the creator of this product. Buyer inquiries appear in your Deal room.</small>{:else}<small>Sign in as a buyer to contact the seller.</small>{/if}<small>Offers are negotiated directly. BidLadders does not hold acquisition funds in this MVP.</small></aside>
 		</div>
 
 		<section class="connections-section"><div class="panel-heading"><div><p class="eyebrow">PROVIDER SIGNALS</p><h2>Connected where available.</h2></div><span class="panel-note">No Meta · No DataFast · No anonymous mode</span></div><div class="connection-grid"><article class:connected={!!listing.google_analytics_property}><strong>Google Analytics</strong><span>{listing.google_analytics_property || 'Not connected'}</span></article><article class:connected={!!listing.google_search_console_url}><strong>Google Search Console</strong><span>{listing.google_search_console_url || 'Not connected'}</span></article><article class:connected={!!listing.github_url}><strong>GitHub activity</strong>{#if listing.github_url}<a href={listing.github_url} target="_blank" rel="noreferrer">Open repository ↗</a>{:else}<span>Not connected</span>{/if}</article></div></section>
