@@ -189,17 +189,28 @@ async function verifyStripeSignature(bodyText: string, signature: string, secret
 }
 
 async function matchingStripeProducts(key: string, name: string) {
-	const products = await stripeListAll(key, 'products', { active: 'true' });
+	const productPages = await Promise.all(['true', 'false'].map((active) => stripeListAll(key, 'products', { active })));
+	const products = Array.from(new Map(productPages.flat().map((product: any) => [String(product.id), product])).values());
 	const allPrices = await Promise.all(['true', 'false'].map((active) => stripeListAll(key, 'prices', { active })));
 	const pricesByProduct = new Map<string, any[]>();
-	for (const price of allPrices.flat()) pricesByProduct.set(String(price.product), [...(pricesByProduct.get(String(price.product)) || []), price]);
-	return Promise.all(products.filter((product: any) => {
+	for (const price of Array.from(new Map(allPrices.flat().map((price: any) => [String(price.id), price])).values())) {
+		const productId = String(price.product || '');
+		if (!productId) continue;
+		pricesByProduct.set(productId, [...(pricesByProduct.get(productId) || []), price]);
+	}
+	const matched = products.filter((product: any) => {
 		const prices = pricesByProduct.get(String(product.id)) || [];
 		return tokenMatch(name, [product.name, product.description, ...prices.flatMap((price) => [price.name, price.description, price.nickname, price.lookup_key, JSON.stringify(price.metadata || {})])]);
-	}).slice(0, 10).map(async (product: any) => {
-		const prices = pricesByProduct.get(String(product.id)) || await stripePricesForProduct(key, product.id);
-		return { id: product.id, name: product.name, description: product.description, prices: prices.map((price: any) => ({ id: price.id, active: price.active, unit_amount: price.unit_amount, currency: price.currency, recurring: price.recurring })) };
-	}));
+	});
+	if (!matched.length) return [];
+	const prices = matched.flatMap((product: any) => pricesByProduct.get(String(product.id)) || []);
+	return [{
+		id: 'stripe-family',
+		name: name.trim(),
+		productIds: matched.map((product: any) => String(product.id)),
+		productNames: matched.map((product: any) => String(product.name || 'Unnamed Stripe Product')),
+		prices: prices.map((price: any) => ({ id: price.id, active: price.active, unit_amount: price.unit_amount, currency: price.currency, recurring: price.recurring }))
+	}];
 }
 
 async function calculateStripeMetrics(key: string, priceIds: string[]) {
@@ -496,28 +507,32 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const input = await body(event); let key: string;
 		try { key = await storedStripeKey(event, user.id, String(input.stripeKey || '')); } catch (error: any) { return json({ error: error?.message || 'Stripe key is required' }, 400); }
 		if (!/^rk_(test|live)_/.test(key)) return json({ error: 'Use a Stripe restricted read-only key beginning with rk_test_ or rk_live_' }, 400);
-		try { return json({ products: await matchingStripeProducts(key, String(input.name || '')) }); } catch (error: any) { return json({ error: error?.message || 'Stripe search failed' }, 400); }
+		try { return json({ families: await matchingStripeProducts(key, String(input.name || '')) }); } catch (error: any) { return json({ error: error?.message || 'Stripe search failed' }, 400); }
 	}
 
 	if (segments[0] === 'listings' && segments[2] === 'verify' && method === 'POST') {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const listingId = Number(segments[1]);
 		const listing = await getDb(event).prepare('SELECT id, name FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number; name: string }>();
 		if (!listing) return json({ error: 'Listing not found' }, 404);
-		const input = await body(event); let key: string; try { key = await storedStripeKey(event, user.id, String(input.stripeKey || '')); } catch (error: any) { return json({ error: error?.message || 'Stripe key is required' }, 400); } const productId = String(input.productId || '');
-		if (!/^rk_(test|live)_/.test(key) || !/^prod_/.test(productId)) return json({ error: 'Confirm a Stripe Product' }, 400);
+		const input = await body(event); let key: string; try { key = await storedStripeKey(event, user.id, String(input.stripeKey || '')); } catch (error: any) { return json({ error: error?.message || 'Stripe key is required' }, 400); }
+		if (!/^rk_(test|live)_/.test(key)) return json({ error: 'Use a Stripe restricted read-only key' }, 400);
 		try {
-			const product = await stripeGet(key, `products/${encodeURIComponent(productId)}`);
-			const prices = await stripePricesForProduct(key, productId);
+			const families = await matchingStripeProducts(key, listing.name);
+			const family = families[0];
+			if (!family?.productIds?.length) return json({ error: `No Stripe Product family matched "${listing.name}"` }, 400);
+			const records = await Promise.all(family.productIds.map(async (productId: string) => ({ product: await stripeGet(key, `products/${encodeURIComponent(productId)}`), prices: await stripePricesForProduct(key, productId) })));
+			const productIds = records.map(({ product }) => String(product.id));
+			const prices = records.flatMap(({ prices: productPrices }) => productPrices);
 			const priceIds = prices.map((price: any) => String(price.id)).filter(Boolean);
 			if (!priceIds.length) return json({ error: 'This Stripe Product has no Prices to monitor' }, 400);
 			const metrics = await calculateStripeMetrics(key, priceIds); const secret = envFrom(event).ENCRYPTION_KEY || envFrom(event).JWT_SECRET || 'local-development-only-change-me'; const encrypted = await encryptText(key, secret);
 			await getDb(event).prepare('INSERT INTO stripe_connections (seller_id, encrypted_key, last_verified_at) VALUES (?, ?, ?) ON CONFLICT(seller_id) DO UPDATE SET encrypted_key=excluded.encrypted_key, last_verified_at=excluded.last_verified_at').bind(user.id, encrypted, now()).run();
-			await getDb(event).prepare('INSERT INTO stripe_product_mappings (listing_id, stripe_product_id, stripe_price_ids, product_name) VALUES (?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET stripe_product_id=excluded.stripe_product_id, stripe_price_ids=excluded.stripe_price_ids, product_name=excluded.product_name, updated_at=CURRENT_TIMESTAMP').bind(listingId, productId, JSON.stringify(priceIds), product.name || listing.name).run();
+			await getDb(event).prepare('INSERT INTO stripe_product_mappings (listing_id, stripe_product_id, stripe_product_ids, stripe_price_ids, product_name) VALUES (?, ?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET stripe_product_id=excluded.stripe_product_id, stripe_product_ids=excluded.stripe_product_ids, stripe_price_ids=excluded.stripe_price_ids, product_name=excluded.product_name, updated_at=CURRENT_TIMESTAMP').bind(listingId, productIds[0], JSON.stringify(productIds), JSON.stringify(priceIds), `${listing.name} (${productIds.length} Stripe Products)`).run();
 			await getDb(event).prepare('UPDATE listings SET mrr_cents = ?, mrr_status = ?, verified_at = ?, updated_at = ? WHERE id = ? AND seller_id = ?').bind(metrics.mrr.cents, metrics.mrr.cents === 0 ? 'zero' : 'verified', now(), now(), listingId, user.id).run();
 			if (metrics.revenueAvailable) await getDb(event).prepare('UPDATE listing_details SET total_revenue_cents = ?, last_30d_revenue_cents = ?, active_customers = ?, updated_at = CURRENT_TIMESTAMP WHERE listing_id = ?').bind(metrics.totalRevenue, metrics.last30dRevenue, metrics.activeCustomers, listingId).run();
-			await getDb(event).prepare('INSERT INTO mrr_snapshots (listing_id, mrr_cents, currency, methodology) VALUES (?, ?, ?, ?)').bind(listingId, metrics.mrr.cents, metrics.mrr.currency, `All ${priceIds.length} Prices under Stripe Product ${productId}; recurring subscriptions normalized monthly; product-attributed paid invoices and one-time Checkout revenue included when the restricted key permits access.`).run();
-			await audit(event, user.id, 'listing.mrr_verified', 'listing', String(listingId), { productId, priceCount: priceIds.length, priceIds, mrrCents: metrics.mrr.cents, revenueAvailable: metrics.revenueAvailable });
-			return json({ mrr: metrics.mrr.cents / 100, currency: metrics.mrr.currency, priceCount: priceIds.length, totalRevenue: metrics.totalRevenue == null ? null : metrics.totalRevenue / 100, last30dRevenue: metrics.last30dRevenue == null ? null : metrics.last30dRevenue / 100, activeCustomers: metrics.activeCustomers, verifiedAt: now() });
+			await getDb(event).prepare('INSERT INTO mrr_snapshots (listing_id, mrr_cents, currency, methodology) VALUES (?, ?, ?, ?)').bind(listingId, metrics.mrr.cents, metrics.mrr.currency, `All ${priceIds.length} Prices across ${productIds.length} Stripe Products matching the listing family; recurring subscriptions normalized monthly; product-attributed paid invoices and one-time Checkout revenue included when the restricted key permits access.`).run();
+			await audit(event, user.id, 'listing.mrr_verified', 'listing', String(listingId), { productIds, priceCount: priceIds.length, priceIds, mrrCents: metrics.mrr.cents, revenueAvailable: metrics.revenueAvailable });
+			return json({ mrr: metrics.mrr.cents / 100, currency: metrics.mrr.currency, productCount: productIds.length, priceCount: priceIds.length, totalRevenue: metrics.totalRevenue == null ? null : metrics.totalRevenue / 100, last30dRevenue: metrics.last30dRevenue == null ? null : metrics.last30dRevenue / 100, activeCustomers: metrics.activeCustomers, verifiedAt: now() });
 		} catch (error: any) { return json({ error: error?.message || 'Stripe verification failed' }, 400); }
 	}
 

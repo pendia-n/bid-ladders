@@ -15,7 +15,7 @@
 	type Deal = { id: number; listing_id: number; listing_name: string; offer: number; status: string; buyer_username: string; seller_username: string };
 	type Message = { id: number; body: string; username: string; created_at: string };
 	type CarouselSlot = { id: number; status: 'available' | 'reserved' | 'paid'; listing?: { name: string; product_url: string; summary: string } | null; expiresAt?: number };
-	type Product = { id: string; name: string; description?: string; prices: { id: string; active?: boolean; unit_amount: number; currency: string; recurring?: { interval: string; interval_count: number } }[] };
+	type StripeFamily = { id: string; name: string; productIds: string[]; productNames: string[]; prices: { id: string; active?: boolean; unit_amount: number; currency: string; recurring?: { interval: string; interval_count: number } }[] };
 	const stripeCreateUrl = 'https://dashboard.stripe.com/apikeys/create?name=BidLadders&permissions%5B%5D=rak_charge_read&permissions%5B%5D=rak_subscription_read&permissions%5B%5D=rak_plan_read&permissions%5B%5D=rak_bucket_connect_read&permissions%5B%5D=rak_file_read&permissions%5B%5D=rak_product_read';
 	const categories = ['AI', 'Developer Tools', 'Productivity', 'Marketing', 'Media', 'E-commerce', 'Education', 'Finance', 'Health', 'Social', 'Consumer', 'Other'];
 	const pricingModels = ['Subscription', 'One-time', 'Usage-based', 'Freemium', 'Advertising', 'Marketplace', 'Other'];
@@ -68,8 +68,9 @@
 	let connectSearchConsole = $state(false);
 	let connectGithub = $state(false);
 	let stripeKey = $state('');
-	let stripeProducts = $state<Product[]>([]);
-	let selectedProduct = $state<Product | null>(null);
+	let stripeFamilies = $state<StripeFamily[]>([]);
+	let selectedFamily = $state<StripeFamily | null>(null);
+	let stripeSearched = $state(false);
 	let stripeListingId = $state(0);
 	let editingListing = $state<Listing | null>(null);
 	let offerListing = $state<Listing | null>(null);
@@ -141,7 +142,7 @@
 		try { await api(`listings/${listing.id}`, { method: 'DELETE' }); notice = 'Listing removed from the public board.'; await loadListings(); } catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to remove listing'; }
 	}
 
-	function openStripeForListing(listing: Listing) { stripeListingId = listing.id; formName = listing.name; stripeKey = ''; stripeProducts = []; selectedProduct = null; modal = 'stripe'; error = ''; }
+	function openStripeForListing(listing: Listing) { stripeListingId = listing.id; formName = listing.name; stripeKey = ''; stripeFamilies = []; selectedFamily = null; stripeSearched = false; modal = 'stripe'; error = ''; }
 
 	async function loadListings() {
 		loading = true;
@@ -210,19 +211,19 @@
 				for (const file of listingFiles) form.append('images', file);
 				await api(`listings/${listingId}/images`, { method: 'POST', body: form });
 			}
-			const shouldVerify = !!stripeKey && !!listingId; const name = formName; const wasEditing = !!editingListing; listingFiles = []; productIconFile = null; modal = null; notice = wasEditing ? 'Listing updated.' : formPublish ? 'Listing published. Verify its Stripe product to add the MRR signal.' : 'Draft saved.'; await loadListings();
-			if (shouldVerify) { stripeListingId = listingId; formName = name; stripeProducts = []; selectedProduct = null; modal = 'stripe'; }
+			const shouldVerify = !!stripeKey && !!listingId; const name = formName; const wasEditing = !!editingListing; listingFiles = []; productIconFile = null; modal = null; notice = wasEditing ? 'Listing updated.' : formPublish ? 'Listing published. Verify its Stripe product family to add the MRR signal.' : 'Draft saved.'; await loadListings();
+			if (shouldVerify) { stripeListingId = listingId; formName = name; stripeFamilies = []; selectedFamily = null; stripeSearched = false; modal = 'stripe'; }
 			else resetListingForm();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to save listing'; }
 	}
 
 	async function searchStripe() {
-		try { stripeProducts = (await api('stripe/search', { method: 'POST', body: JSON.stringify({ stripeKey, name: formName }) })).products || []; selectedProduct = null; } catch (cause) { error = cause instanceof Error ? cause.message : 'Stripe search failed'; }
+		try { stripeSearched = false; stripeFamilies = (await api('stripe/search', { method: 'POST', body: JSON.stringify({ stripeKey, name: formName }) })).families || []; selectedFamily = stripeFamilies[0] || null; stripeSearched = true; } catch (cause) { error = cause instanceof Error ? cause.message : 'Stripe search failed'; }
 	}
 
 	async function verifyStripe() {
-		if (!selectedProduct) return;
-		try { const data = await api(`listings/${stripeListingId}/verify`, { method: 'POST', body: JSON.stringify({ stripeKey, productId: selectedProduct.id }) }); modal = null; notice = `Stripe Product verified across all ${data.priceCount} Prices.`; await loadListings(); resetListingForm(); } catch (cause) { error = cause instanceof Error ? cause.message : 'Stripe verification failed'; }
+		if (!selectedFamily) return;
+		try { const data = await api(`listings/${stripeListingId}/verify`, { method: 'POST', body: JSON.stringify({ stripeKey }) }); modal = null; notice = `Stripe family verified across ${data.productCount} Products and all ${data.priceCount} Prices.`; await loadListings(); resetListingForm(); } catch (cause) { error = cause instanceof Error ? cause.message : 'Stripe verification failed'; }
 	}
 
 	async function submitOffer() {
@@ -348,7 +349,7 @@
 				<div class="field check-row"><input id="publish" type="checkbox" bind:checked={formPublish} /><label for="publish">Publish immediately</label></div>
 				<button class="button coral full" onclick={submitListing}>{editingListing ? 'Save changes' : 'Save listing'}</button>
 			{:else if modal === 'stripe'}
-				<p class="eyebrow">PRODUCT-WIDE MRR VERIFICATION</p><h2>Verify the entire Stripe product.</h2><p class="modal-intro">Choose the Stripe Product that matches this listing. BidLadders automatically includes every Price under it, including one-time and recurring Prices, so Basic and Extra stay together. The same restricted key can be reused for every product in this Stripe account.</p><div class="field"><label for="stripe-key-modal">Restricted read-only key (optional after first use)</label><input id="stripe-key-modal" type="password" bind:value={stripeKey} placeholder="rk_test_... or leave blank to reuse" /></div><button class="button dark full" onclick={searchStripe}>Search Stripe</button>{#if stripeProducts.length}<div class="stripe-results">{#each stripeProducts as product}<button class="product-choice" class:chosen={selectedProduct?.id === product.id} onclick={() => selectedProduct = product}><strong>{product.name}</strong><small>{product.prices.length} Prices · all automatically included</small></button>{/each}</div>{/if}{#if selectedProduct}<div class="price-list"><p class="eyebrow">{selectedProduct.name}</p><strong>All {selectedProduct.prices.length} Prices will be monitored</strong><small>One-time revenue and recurring subscriptions are included where Stripe exposes product attribution. No individual Price selection is used.</small></div><button class="button mint full" onclick={verifyStripe}>Verify entire product</button>{/if}
+				<p class="eyebrow">PRODUCT-FAMILY MRR VERIFICATION</p><h2>Verify the whole product family.</h2><p class="modal-intro">Search using the listing name. BidLadders groups every matching Stripe Product and automatically monitors every Price under them, including one-time and recurring Prices. There is no individual Product or Price selection.</p><div class="field"><label for="stripe-key-modal">Restricted read-only key (optional after first use)</label><input id="stripe-key-modal" type="password" bind:value={stripeKey} placeholder="rk_test_... or leave blank to reuse" /></div><button class="button dark full" onclick={searchStripe}>Find all matching Stripe Products</button>{#if selectedFamily}<div class="price-list stripe-family"><p class="eyebrow">{selectedFamily.name}</p><strong>{selectedFamily.productIds.length} Stripe Products · all {selectedFamily.prices.length} Prices will be monitored</strong><small>{selectedFamily.productNames.join(' · ')}</small><small>Recurring subscriptions and one-time revenue are included where Stripe exposes product attribution.</small></div><button class="button mint full" onclick={verifyStripe}>Verify this entire product family</button>{:else if stripeSearched}<p class="field-help">No matching Stripe Product family was found for &quot;{formName}&quot;. Check the listing name and Stripe Product names or descriptions.</p>{/if}
 			{:else if modal === 'carousel'}
 				<p class="eyebrow">24-HOUR PRODUCT SPOT</p><h2>Put one product in the moving strip.</h2><p class="modal-intro">$10 buys the selected carousel position for exactly 24 hours. Your product must already be published. The spot is reserved before checkout.</p><div class="field"><label for="carousel-product">Product to display</label><select id="carousel-product" bind:value={carouselListingId}><option value="">Choose a published product</option>{#each listings.filter((listing) => listing.seller_username === user?.username) as listing}<option value={listing.id}>{listing.name}</option>{/each}</select></div><button class="button coral full" onclick={buyCarouselSpot}>Continue to secure checkout · $10</button>
 			{:else if modal === 'offer' && offerListing}
