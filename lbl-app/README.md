@@ -8,6 +8,7 @@ BidLadders is a product-level acquisition marketplace. Sellers publish one produ
 - Product-family Stripe verification: the seller searches by listing name, then every matching Stripe Product and every active or inactive Price under those Products is stored for monitoring. No individual Price selection is used.
 - MRR from active, trialing, and past-due recurring subscriptions, normalized to a monthly value.
 - Product-attributed paid invoice and one-time Checkout revenue, including a rolling 30-day total and daily series when the restricted Stripe key exposes it.
+- Direct Charges created without an invoice or Checkout line-item Price ID cannot be reliably attributed to a Product; those amounts are left out rather than guessed.
 - Optional Google Analytics and Search Console OAuth connections. Public summaries require explicit seller opt-in; owners can see their connected summaries privately.
 - Twelve Durable Object carousel spots. Each spot is reserved before Checkout, charged exactly $10 through inline Stripe `price_data`, and remains live for exactly 24 hours after the signed webhook confirms payment.
 - Permanent rank bids use inline dynamic Stripe `price_data`; a paid bid remains until a later successful bid replaces it. A D1-backed reservation prevents two simultaneous Checkout sessions from holding the same target rank.
