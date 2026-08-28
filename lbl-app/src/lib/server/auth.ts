@@ -17,6 +17,9 @@ export type EnvBindings = {
 	ESCROW_API_EMAIL?: string;
 	ESCROW_API_KEY?: string;
 	ESCROW_API_BASE_URL?: string;
+	ESCROW_WEBHOOK_SECRET?: string;
+	GOOGLE_CLIENT_ID?: string;
+	GOOGLE_CLIENT_SECRET?: string;
 	APP_URL?: string;
 };
 

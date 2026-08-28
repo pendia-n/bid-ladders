@@ -10,7 +10,8 @@ type SlotRecord = {
 	expiresAt?: number;
 };
 
-const reservationMs = 10 * 60 * 1000;
+// Match the shortest Stripe Checkout expiry used by the Worker.
+const reservationMs = 35 * 60 * 1000;
 const placementMs = 24 * 60 * 60 * 1000;
 
 export class CarouselSlot {

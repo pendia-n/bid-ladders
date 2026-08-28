@@ -1,13 +1,17 @@
 import type { RequestEvent } from '@sveltejs/kit';
-import { decryptText, encryptText, verifyTotp } from '$lib/server/crypto';
+import { base64UrlDecode, base64UrlEncode, decryptText, encryptText, signHs256, verifyHs256, verifyTotp } from '$lib/server/crypto';
 import { envFrom, getDb, loginUser, registerUser, requireUser, userFromToken, verifyUserTotp, type AuthUser } from '$lib/server/auth';
-import { createEscrowTransaction, platformFeeForAmount } from '$lib/server/escrow';
+import { createEscrowTransaction, escrowWebLink, getEscrowTransaction, platformFeeForAmount } from '$lib/server/escrow';
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const now = () => new Date().toISOString();
 const asCents = (value: unknown) => Math.max(0, Math.round(Number(value || 0) * 100));
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_MESSAGE_MEDIA_BYTES = 1 * 1024 * 1024;
+const CAROUSEL_RESERVATION_MS = 35 * 60 * 1000;
+const PERMANENT_BID_EXPIRY = '9999-12-31T23:59:59.999Z';
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const MESSAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'application/pdf']);
 
 async function body(event: RequestEvent): Promise<Record<string, any>> {
 	try { return await event.request.json(); } catch { return {}; }
@@ -32,7 +36,7 @@ function mediaBucket(event: RequestEvent) {
 function mediaUrl(key: string) { return key ? `/api/media?key=${encodeURIComponent(key)}` : '/profile.svg'; }
 
 function extensionFor(type: string) {
-	return ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' } as Record<string, string>)[type] || 'bin';
+	return ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'video/mp4': 'mp4', 'video/webm': 'webm', 'audio/mpeg': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'application/pdf': 'pdf' } as Record<string, string>)[type] || 'bin';
 }
 
 function validateImage(file: FormDataEntryValue | null, label: string, types = IMAGE_TYPES) {
@@ -112,6 +116,111 @@ function tokenMatch(query: string, values: unknown[]) {
 }
 function parsedJson(value: string | null) { try { return value ? JSON.parse(value) : null; } catch { return null; } }
 
+function verifiedEscrowStatus(transaction: Record<string, any>) {
+	if (transaction.close_date) return 'complete';
+	const items = Array.isArray(transaction.items) ? transaction.items : [];
+	const itemStates = items.map((item: any) => item?.status || {});
+	const scheduleStates = items.flatMap((item: any) => Array.isArray(item?.schedule) ? item.schedule.map((schedule: any) => schedule?.status || {}) : []);
+	if (scheduleStates.some((state: any) => state.disbursed_to_beneficiary)) return 'payment_disbursed';
+	if (scheduleStates.some((state: any) => state.payment_received)) return 'payment_received';
+	if (itemStates.some((state: any) => state.rejected)) return 'rejected';
+	if (itemStates.length && itemStates.every((state: any) => state.accepted)) return 'accepted';
+	if (itemStates.some((state: any) => state.received)) return 'received';
+	if (itemStates.some((state: any) => state.shipped)) return 'shipped';
+	return null;
+}
+
+function publicGoogleSummary(value: string | null, provider: 'analytics' | 'search_console') {
+	const data = parsedJson(value);
+	if (!data) return null;
+	if (provider === 'analytics') return { property: data.property, activeUsers: Number(data.activeUsers || 0), sessions: Number(data.sessions || 0), pageViews: Number(data.pageViews || 0), period: data.period || null, fetchedAt: data.fetchedAt || null };
+	return { property: data.property, clicks: Number(data.clicks || 0), impressions: Number(data.impressions || 0), averagePosition: Number(data.averagePosition || 0), days: Number(data.days || 0), period: data.period || null, fetchedAt: data.fetchedAt || null };
+}
+
+function googleEncryptionSecret(event: RequestEvent) {
+	const secret = envFrom(event).ENCRYPTION_KEY;
+	if (!secret) throw new Error('Google connections require the ENCRYPTION_KEY Worker secret');
+	return secret;
+}
+
+function googleJwtSecret(event: RequestEvent) {
+	const secret = envFrom(event).JWT_SECRET;
+	if (!secret) throw new Error('Google connections require the JWT_SECRET Worker secret');
+	return secret;
+}
+
+function googleConfig(event: RequestEvent) {
+	const env = envFrom(event);
+	if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) throw new Error('Google connections are not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to this Worker.');
+	return { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
+}
+
+async function googleState(event: RequestEvent, value: Record<string, unknown>) {
+	const encoded = base64UrlEncode(JSON.stringify({ ...value, exp: Math.floor(Date.now() / 1000) + 10 * 60 }));
+	return `${encoded}.${await signHs256(encoded, googleJwtSecret(event))}`;
+}
+
+async function readGoogleState(event: RequestEvent, value: string) {
+	const [encoded, signature] = value.split('.');
+	if (!encoded || !signature || !(await verifyHs256(encoded, signature, googleJwtSecret(event)))) throw new Error('Invalid Google connection state');
+	const data = JSON.parse(new TextDecoder().decode(base64UrlDecode(encoded))) as Record<string, any>;
+	if (!data.exp || data.exp < Math.floor(Date.now() / 1000)) throw new Error('Google connection state expired');
+	return data;
+}
+
+async function googleTokenRequest(event: RequestEvent, params: URLSearchParams) {
+	const config = googleConfig(event);
+	params.set('client_id', config.clientId);
+	params.set('client_secret', config.clientSecret);
+	const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: params });
+	const data = await response.json() as any;
+	if (!response.ok) throw new Error(data.error_description || data.error || 'Google token exchange failed');
+	return data;
+}
+
+async function googleApi(accessToken: string, path: string, init: RequestInit = {}) {
+	const headers = new Headers(init.headers);
+	headers.set('authorization', `Bearer ${accessToken}`);
+	headers.set('content-type', 'application/json');
+	const response = await fetch(`https://analyticsdata.googleapis.com/v1beta/${path}`, { ...init, headers });
+	const data = await response.json().catch(() => ({})) as any;
+	if (!response.ok) throw new Error(data.error?.message || `Google API returned ${response.status}`);
+	return data;
+}
+
+async function searchConsoleApi(accessToken: string, path: string, init: RequestInit = {}) {
+	const headers = new Headers(init.headers);
+	headers.set('authorization', `Bearer ${accessToken}`);
+	headers.set('content-type', 'application/json');
+	const response = await fetch(`https://searchconsole.googleapis.com/webmasters/v3/${path}`, { ...init, headers });
+	const data = await response.json().catch(() => ({})) as any;
+	if (!response.ok) throw new Error(data.error?.message || `Search Console returned ${response.status}`);
+	return data;
+}
+
+async function googleAccessToken(event: RequestEvent, refreshToken: string) {
+	const data = await googleTokenRequest(event, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }));
+	return String(data.access_token || '');
+}
+
+function analyticsProperty(value: string) { return value.trim().replace(/^properties\//, ''); }
+
+async function fetchGoogleMetrics(event: RequestEvent, provider: 'analytics' | 'search_console', propertyRef: string, refreshToken: string) {
+	const accessToken = await googleAccessToken(event, refreshToken);
+	const endDate = new Date();
+	const startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+	const formatDate = (date: Date) => date.toISOString().slice(0, 10);
+	if (provider === 'analytics') {
+		const property = analyticsProperty(propertyRef);
+		const data = await googleApi(accessToken, `properties/${encodeURIComponent(property)}:runReport`, { method: 'POST', body: JSON.stringify({ dateRanges: [{ startDate: formatDate(startDate), endDate: formatDate(endDate) }], metrics: [{ name: 'activeUsers' }, { name: 'sessions' }, { name: 'screenPageViews' }] }) });
+		const values = data.rows?.[0]?.metricValues?.map((item: any) => Number(item.value || 0)) || [];
+		return { provider, property: `properties/${property}`, period: { start: formatDate(startDate), end: formatDate(endDate) }, activeUsers: values[0] || 0, sessions: values[1] || 0, pageViews: values[2] || 0, fetchedAt: now() };
+	}
+	const data = await searchConsoleApi(accessToken, `sites/${encodeURIComponent(propertyRef)}/searchAnalytics/query`, { method: 'POST', body: JSON.stringify({ startDate: formatDate(new Date(endDate.getTime() - 28 * 24 * 60 * 60 * 1000)), endDate: formatDate(new Date(endDate.getTime() - 2 * 24 * 60 * 60 * 1000)), dimensions: ['date'], rowLimit: 30 }) });
+	const rows = Array.isArray(data.rows) ? data.rows.map((row: any) => ({ date: row.keys?.[0] || null, clicks: Number(row.clicks || 0), impressions: Number(row.impressions || 0), ctr: Number(row.ctr || 0), position: Number(row.position || 0) })) : [];
+	return { provider, property: propertyRef, rows, fetchedAt: now() };
+}
+
 function githubRepoPath(value: string) {
 	try {
 		const url = new URL(value);
@@ -149,7 +258,7 @@ async function storedStripeKey(event: RequestEvent, sellerId: number, suppliedKe
 	return decryptText(connection.encrypted_key, secret);
 }
 
-type ListingRow = { id: number; seller_id: number; product_url: string; name: string; summary: string; description: string | null; asking_price_cents: number; mrr_cents: number; mrr_status: string; verified_at: string | null; operating_cost_cents: number; assets_included: string; product_icon_key: string | null; created_at: string; seller_username: string; seller_profile_image_key: string | null; category: string | null; problem_solved: string | null; audience: string | null; pricing_model: string | null; tech_stack: string | null; total_revenue_cents: number | null; last_30d_revenue_cents: number | null; active_customers: number | null; growth_percent: number | null; churn_percent: number | null; github_url: string | null; github_activity_json: string | null; github_synced_at: string | null; google_analytics_property: string | null; google_search_console_url: string | null };
+type ListingRow = { id: number; seller_id: number; product_url: string; name: string; summary: string; description: string | null; asking_price_cents: number; mrr_cents: number; mrr_status: string; verified_at: string | null; operating_cost_cents: number; assets_included: string; product_icon_key: string | null; created_at: string; seller_username: string; seller_profile_image_key: string | null; category: string | null; problem_solved: string | null; audience: string | null; pricing_model: string | null; tech_stack: string | null; total_revenue_cents: number | null; last_30d_revenue_cents: number | null; revenue_daily_json: string | null; active_customers: number | null; deal_count: number; growth_percent: number | null; churn_percent: number | null; github_url: string | null; github_activity_json: string | null; github_synced_at: string | null; google_analytics_property: string | null; google_search_console_url: string | null; google_analytics_json: string | null; google_search_console_json: string | null; public_metrics: number };
 type BidRow = { id: number; listing_id: number; amount_cents: number; paid_at: string; expires_at: string };
 
 async function loadRankedListings(event: RequestEvent, query = '') {
@@ -157,7 +266,7 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 	const search = normalized(query);
 	const filter = search ? 'AND (LOWER(l.name) LIKE ? OR LOWER(l.summary) LIKE ?)' : '';
 	const args = search ? [`%${search}%`, `%${search}%`] : [];
-	const listingRows = await db.prepare(`SELECT l.id, l.seller_id, l.product_url, l.name, l.summary, l.description, l.asking_price_cents, l.mrr_cents, l.mrr_status, l.verified_at, l.operating_cost_cents, l.assets_included, l.product_icon_key, l.created_at, u.username AS seller_username, u.profile_image_key AS seller_profile_image_key, d.category, d.problem_solved, d.audience, d.pricing_model, d.tech_stack, d.total_revenue_cents, d.last_30d_revenue_cents, d.active_customers, d.growth_percent, d.churn_percent, d.github_url, d.github_activity_json, d.github_synced_at, d.google_analytics_property, d.google_search_console_url FROM listings l JOIN users u ON u.id = l.seller_id LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.status = 'published' ${filter}`).bind(...args).all<ListingRow>();
+	const listingRows = await db.prepare(`SELECT l.id, l.seller_id, l.product_url, l.name, l.summary, l.description, l.asking_price_cents, l.mrr_cents, l.mrr_status, l.verified_at, l.operating_cost_cents, l.assets_included, l.product_icon_key, l.created_at, u.username AS seller_username, u.profile_image_key AS seller_profile_image_key, d.category, d.problem_solved, d.audience, d.pricing_model, d.tech_stack, d.total_revenue_cents, d.last_30d_revenue_cents, d.revenue_daily_json, d.active_customers, d.growth_percent, d.churn_percent, d.github_url, d.github_activity_json, d.github_synced_at, d.google_analytics_property, d.google_search_console_url, d.google_analytics_json, d.google_search_console_json, d.public_metrics, (SELECT COUNT(*) FROM deals deal WHERE deal.listing_id = l.id AND deal.status NOT IN ('cancelled', 'closed')) AS deal_count FROM listings l JOIN users u ON u.id = l.seller_id LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.status = 'published' ${filter}`).bind(...args).all<ListingRow>();
 	const bidRows = await db.prepare(`SELECT id, listing_id, amount_cents, paid_at, expires_at FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC`).bind(now()).all<BidRow>();
 	const imageRows = await db.prepare('SELECT listing_id, object_key, sort_order FROM listing_images ORDER BY sort_order ASC, id ASC').all<{ listing_id: number; object_key: string; sort_order: number }>();
 	const imagesByListing = new Map<number, string[]>();
@@ -176,6 +285,8 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 		operating_cost: Number(listing.operating_cost_cents || 0) / 100,
 		total_revenue: listing.total_revenue_cents == null ? null : Number(listing.total_revenue_cents) / 100,
 		last_30d_revenue: listing.last_30d_revenue_cents == null ? null : Number(listing.last_30d_revenue_cents) / 100,
+		revenue_daily: parsedJson(listing.revenue_daily_json),
+		deal_count: Number(listing.deal_count || 0),
 		seller_profile_image_url: mediaUrl(listing.seller_profile_image_key || ''),
 		product_icon_url: listing.product_icon_key ? mediaUrl(listing.product_icon_key) : null,
 		images: imagesByListing.get(listing.id) || [],
@@ -184,7 +295,10 @@ async function loadRankedListings(event: RequestEvent, query = '') {
 		visible_on_home: index < 330,
 		is_sponsored: bestBid.has(listing.id),
 		github_activity: parsedJson(listing.github_activity_json),
-		github_synced_at: listing.github_synced_at
+		github_synced_at: listing.github_synced_at,
+		google_analytics: listing.public_metrics ? publicGoogleSummary(listing.google_analytics_json, 'analytics') : null,
+		google_search_console: listing.public_metrics ? publicGoogleSummary(listing.google_search_console_json, 'search_console') : null,
+		public_metrics: !!listing.public_metrics
 	}));
 }
 
@@ -249,6 +363,7 @@ async function calculateStripeMetrics(key: string, priceIds: string[]) {
 	let totalRevenue = 0;
 	let last30dRevenue = 0;
 	let revenueAvailable = false;
+	const dailyRevenue = new Map<string, number>();
 	const cutoff = Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
 	const addRevenue = (amount: unknown, timestamp: unknown, priceId: unknown, revenueCurrency?: string) => {
 		if (!priceSet.has(String(priceId || ''))) return;
@@ -258,6 +373,10 @@ async function calculateStripeMetrics(key: string, priceIds: string[]) {
 		currency = revenueCurrency || currency;
 		totalRevenue += cents;
 		if (Number(timestamp || 0) >= cutoff) last30dRevenue += cents;
+		if (Number(timestamp || 0) >= cutoff) {
+			const day = new Date(Number(timestamp) * 1000).toISOString().slice(0, 10);
+			dailyRevenue.set(day, (dailyRevenue.get(day) || 0) + cents);
+		}
 	};
 
 	try {
@@ -282,7 +401,7 @@ async function calculateStripeMetrics(key: string, priceIds: string[]) {
 		// One-time Checkout attribution is optional when the key lacks Checkout access.
 	}
 
-	return { mrr: { cents: Math.round(mrr), currency }, totalRevenue: revenueAvailable ? Math.round(totalRevenue) : null, last30dRevenue: revenueAvailable ? Math.round(last30dRevenue) : null, activeCustomers: activeCustomers.size, currency, revenueAvailable };
+	return { mrr: { cents: Math.round(mrr), currency }, totalRevenue: revenueAvailable ? Math.round(totalRevenue) : null, last30dRevenue: revenueAvailable ? Math.round(last30dRevenue) : null, revenueDaily: [...dailyRevenue.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, cents]) => ({ date, cents })), activeCustomers: activeCustomers.size, currency, revenueAvailable };
 }
 
 async function handle(event: RequestEvent): Promise<Response> {
@@ -298,6 +417,17 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const object = await mediaBucket(event).get(key);
 		if (!object) return new Response('Not found', { status: 404 });
 		return new Response(await object.arrayBuffer(), { headers: { 'content-type': object.httpMetadata?.contentType || 'application/octet-stream', 'cache-control': object.httpMetadata?.cacheControl || 'public, max-age=3600' } });
+	}
+
+	if (route === 'media/message' && method === 'GET') {
+		const user = await requireUser(event);
+		const key = event.url.searchParams.get('key') || '';
+		if (!/^messages\/[0-9]+\/[A-Za-z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mp3|ogg|wav|pdf)$/.test(key)) return new Response('Not found', { status: 404 });
+		const allowed = await getDb(event).prepare('SELECT d.id FROM message_media mm JOIN messages m ON m.id = mm.message_id JOIN deals d ON d.id = m.deal_id WHERE mm.object_key = ? AND (d.seller_id = ? OR (d.buyer_id = ? AND d.buyer_visible = 1))').bind(key, user.id, user.id).first();
+		if (!allowed) return new Response('Not found', { status: 404 });
+		const object = await mediaBucket(event).get(key);
+		if (!object) return new Response('Not found', { status: 404 });
+		return new Response(await object.arrayBuffer(), { headers: { 'content-type': object.httpMetadata?.contentType || 'application/octet-stream', 'cache-control': 'private, max-age=3600' } });
 	}
 
 	if (route === 'media/profile' && method === 'POST') {
@@ -393,8 +523,8 @@ async function handle(event: RequestEvent): Promise<Response> {
 	if (route === 'carousel' && method === 'GET') {
 		try {
 			const db = getDb(event);
-			const orders = await db.prepare("SELECT c.slot_id, c.listing_id, c.starts_at, c.expires_at, l.name, l.product_url, l.summary FROM carousel_orders c JOIN listings l ON l.id = c.listing_id WHERE c.status = 'paid' AND c.expires_at > ? ORDER BY c.slot_id").bind(now()).all<any>();
-			const active = new Map((orders.results ?? []).map((row: any) => [Number(row.slot_id), row]));
+			const orders = await db.prepare("SELECT c.slot_id, c.listing_id, c.starts_at, c.expires_at, l.name, l.product_url, l.summary, l.product_icon_key, (SELECT object_key FROM listing_images image WHERE image.listing_id = l.id ORDER BY image.sort_order ASC, image.id ASC LIMIT 1) AS first_image_key FROM carousel_orders c JOIN listings l ON l.id = c.listing_id WHERE c.status = 'paid' AND c.expires_at > ? AND l.status = 'published' ORDER BY c.slot_id").bind(now()).all<any>();
+			const active = new Map((orders.results ?? []).map((row: any) => [Number(row.slot_id), { ...row, image_url: mediaUrl(row.product_icon_key || row.first_image_key || '') }]));
 			const slots = await Promise.all(Array.from({ length: 12 }, (_, index) => carouselRequest(event, index + 1, '/', {}).catch(() => ({ slot: { status: 'available' } }))));
 			return json({ slots: slots.map((data, index) => ({ id: index + 1, ...data.slot, listing: active.get(index + 1) || null })) });
 		} catch (error: any) { return json({ error: error?.message || 'Carousel unavailable' }, 503); }
@@ -412,7 +542,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 			reservation = (await carouselRequest(event, slotId, '/reserve', { listingId, sellerId: user.id })).slot;
 			const reservedUntil = new Date(reservation.reservedUntil).toISOString();
 			const result = await getDb(event).prepare('INSERT INTO carousel_orders (slot_id, listing_id, seller_id, reservation_id, reserved_until) VALUES (?, ?, ?, ?, ?)').bind(slotId, listingId, user.id, reservation.reservationId, reservedUntil).run();
-			const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `BidLadders 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
+				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `BidLadders 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
 			await getDb(event).prepare('UPDATE carousel_orders SET checkout_session_id = ? WHERE id = ?').bind(session.id, result.meta.last_row_id).run();
 			return json({ url: session.url, sessionId: session.id, reservedUntil });
 		} catch (error: any) {
@@ -441,7 +571,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!name || !summary || !input.productUrl || !input.assetsIncluded) return json({ error: 'Product URL, name, summary, and assets included are required' }, 400);
 		if (mrrStatus === 'zero' && description.length < 60) return json({ error: 'A $0 MRR listing needs a detailed description of at least 60 characters' }, 400);
 		const result = await getDb(event).prepare('INSERT INTO listings (seller_id, product_url, name, summary, description, asking_price_cents, mrr_status, operating_cost_cents, assets_included, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(user.id, input.productUrl, name, summary, description || null, asCents(input.askingPrice), mrrStatus, asCents(input.operatingCost), input.assetsIncluded, input.publish ? 'published' : 'draft').run();
-		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(result.meta.last_row_id, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), githubUrl || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null).run();
+		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url, public_metrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(result.meta.last_row_id, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), githubUrl || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null, input.publicMetrics ? 1 : 0).run();
 		if (githubUrl) await syncGithubActivity(event, Number(result.meta.last_row_id), githubUrl).catch((error) => console.error('GitHub sync failed', error));
 		await audit(event, user.id, 'listing.created', 'listing', String(result.meta.last_row_id), { status: input.publish ? 'published' : 'draft' });
 		return json({ id: result.meta.last_row_id });
@@ -456,7 +586,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!name || !summary || !productUrl || !assetsIncluded) return json({ error: 'Product URL, name, summary, and assets included are required' }, 400);
 		if (mrrStatus === 'zero' && description.length < 60) return json({ error: 'A $0 MRR listing needs a detailed description of at least 60 characters' }, 400);
 		await getDb(event).prepare('UPDATE listings SET product_url = ?, name = ?, summary = ?, description = ?, asking_price_cents = ?, mrr_status = ?, mrr_cents = ?, verified_at = ?, operating_cost_cents = ?, assets_included = ?, status = ?, updated_at = ? WHERE id = ? AND seller_id = ?').bind(productUrl, name, summary, description || null, asCents(input.askingPrice), mrrStatus, mrrStatus === 'verified' ? listing.mrr_cents : 0, mrrStatus === 'verified' ? listing.verified_at : null, asCents(input.operatingCost), assetsIncluded, input.publish ? 'published' : 'draft', now(), listingId, user.id).run();
-		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET category=excluded.category, problem_solved=excluded.problem_solved, audience=excluded.audience, pricing_model=excluded.pricing_model, tech_stack=excluded.tech_stack, total_revenue_cents=excluded.total_revenue_cents, last_30d_revenue_cents=excluded.last_30d_revenue_cents, active_customers=excluded.active_customers, growth_percent=excluded.growth_percent, churn_percent=excluded.churn_percent, github_url=excluded.github_url, google_analytics_property=excluded.google_analytics_property, google_search_console_url=excluded.google_search_console_url, updated_at=CURRENT_TIMESTAMP').bind(listingId, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), githubUrl || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null).run();
+		await getDb(event).prepare('INSERT INTO listing_details (listing_id, category, problem_solved, audience, pricing_model, tech_stack, total_revenue_cents, last_30d_revenue_cents, active_customers, growth_percent, churn_percent, github_url, google_analytics_property, google_search_console_url, public_metrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET category=excluded.category, problem_solved=excluded.problem_solved, audience=excluded.audience, pricing_model=excluded.pricing_model, tech_stack=excluded.tech_stack, total_revenue_cents=excluded.total_revenue_cents, last_30d_revenue_cents=excluded.last_30d_revenue_cents, active_customers=excluded.active_customers, growth_percent=excluded.growth_percent, churn_percent=excluded.churn_percent, github_url=excluded.github_url, google_analytics_property=excluded.google_analytics_property, google_search_console_url=excluded.google_search_console_url, public_metrics=excluded.public_metrics, updated_at=CURRENT_TIMESTAMP').bind(listingId, String(input.category || '').trim() || null, String(input.problemSolved || '').trim() || null, String(input.audience || '').trim() || null, String(input.pricingModel || '').trim() || null, String(input.techStack || '').trim() || null, input.totalRevenue === '' || input.totalRevenue == null ? null : asCents(input.totalRevenue), input.last30dRevenue === '' || input.last30dRevenue == null ? null : asCents(input.last30dRevenue), input.activeCustomers === '' || input.activeCustomers == null ? null : Math.max(0, Math.round(Number(input.activeCustomers))), input.growthPercent === '' || input.growthPercent == null ? null : Number(input.growthPercent), input.churnPercent === '' || input.churnPercent == null ? null : Number(input.churnPercent), githubUrl || null, String(input.googleAnalyticsProperty || '').trim() || null, String(input.googleSearchConsoleUrl || '').trim() || null, input.publicMetrics ? 1 : 0).run();
 		if (githubUrl) await syncGithubActivity(event, listingId, githubUrl).catch((error) => console.error('GitHub sync failed', error));
 		await audit(event, user.id, 'listing.updated', 'listing', String(listingId), { status: input.publish ? 'published' : 'draft' });
 		return json({ ok: true, id: listingId });
@@ -518,6 +648,55 @@ async function handle(event: RequestEvent): Promise<Response> {
 		catch (error: any) { return record.github_activity_json ? json({ activity: parsedJson(record.github_activity_json), syncedAt: record.github_synced_at, stale: true }) : json({ error: error?.message || 'Unable to load GitHub activity' }, 502); }
 	}
 
+	if (segments[0] === 'listings' && segments[1] && segments[2] === 'google' && method === 'GET') {
+		const user = await requireUser(event);
+		const listingId = Number(segments[1]);
+		const record = await getDb(event).prepare('SELECT l.seller_id, d.google_analytics_json, d.google_search_console_json FROM listings l LEFT JOIN listing_details d ON d.listing_id = l.id WHERE l.id = ?').bind(listingId).first<any>();
+		if (!record || Number(record.seller_id) !== user.id) return json({ error: 'Listing not found' }, 404);
+		return json({ analytics: publicGoogleSummary(record.google_analytics_json, 'analytics'), searchConsole: publicGoogleSummary(record.google_search_console_json, 'search_console') });
+	}
+
+	if (route === 'google/connect' && method === 'GET') {
+		const user = await requireUser(event);
+		if (user.role !== 'seller') return json({ error: 'Seller access required' }, 403);
+		const listingId = Number(event.url.searchParams.get('listingId'));
+		const provider = event.url.searchParams.get('provider');
+		const property = String(event.url.searchParams.get('property') || '').trim();
+		if (!Number.isInteger(listingId) || listingId < 1 || !['analytics', 'search_console'].includes(provider || '') || !property) return json({ error: 'Listing, provider, and property are required' }, 400);
+		const listing = await getDb(event).prepare("SELECT id FROM listings WHERE id = ? AND seller_id = ? AND status = 'published'").bind(listingId, user.id).first();
+		if (!listing) return json({ error: 'Published listing not found' }, 404);
+		try {
+			const config = googleConfig(event);
+			const state = await googleState(event, { listingId, provider, property, sellerId: user.id });
+			const redirectUri = `${envFrom(event).APP_URL || event.url.origin}/api/google/callback`;
+			const scope = provider === 'analytics' ? 'https://www.googleapis.com/auth/analytics.readonly' : 'https://www.googleapis.com/auth/webmasters.readonly';
+			const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+			url.search = new URLSearchParams({ client_id: config.clientId, redirect_uri: redirectUri, response_type: 'code', access_type: 'offline', prompt: 'consent', scope, state }).toString();
+			return Response.redirect(url.toString(), 302);
+		} catch (error: any) { return json({ error: error?.message || 'Google connection is unavailable' }, 503); }
+	}
+
+	if (route === 'google/callback' && method === 'GET') {
+		const code = event.url.searchParams.get('code') || '';
+		const stateValue = event.url.searchParams.get('state') || '';
+		const failure = event.url.searchParams.get('error');
+		if (failure) return Response.redirect(`${envFrom(event).APP_URL || event.url.origin}/product/${encodeURIComponent(String(event.url.searchParams.get('listingId') || ''))}?google=cancelled`, 302);
+		try {
+			const state = await readGoogleState(event, stateValue);
+			if (!code || !Number.isInteger(Number(state.listingId)) || !['analytics', 'search_console'].includes(state.provider)) throw new Error('Invalid Google callback');
+			const redirectUri = `${envFrom(event).APP_URL || event.url.origin}/api/google/callback`;
+			const token = await googleTokenRequest(event, new URLSearchParams({ code, grant_type: 'authorization_code', redirect_uri: redirectUri }));
+			const refreshToken = String(token.refresh_token || '');
+			if (!refreshToken) throw new Error('Google did not return a refresh token. Revoke the connection and try again.');
+			const metrics = await fetchGoogleMetrics(event, state.provider, String(state.property), refreshToken);
+			const summary = state.provider === 'analytics' ? metrics : { provider: 'search_console', property: metrics.property, period: { start: metrics.rows[0]?.date || null, end: metrics.rows[metrics.rows.length - 1]?.date || null }, clicks: metrics.rows.reduce((sum: number, row: any) => sum + row.clicks, 0), impressions: metrics.rows.reduce((sum: number, row: any) => sum + row.impressions, 0), averagePosition: metrics.rows.length ? metrics.rows.reduce((sum: number, row: any) => sum + row.position, 0) / metrics.rows.length : 0, days: metrics.rows.length, fetchedAt: metrics.fetchedAt };
+			await getDb(event).prepare('INSERT INTO google_connections (listing_id, provider, property_ref, encrypted_refresh_token) VALUES (?, ?, ?, ?) ON CONFLICT(listing_id, provider) DO UPDATE SET property_ref=excluded.property_ref, encrypted_refresh_token=excluded.encrypted_refresh_token, updated_at=CURRENT_TIMESTAMP').bind(Number(state.listingId), state.provider, String(state.property), await encryptText(refreshToken, googleEncryptionSecret(event))).run();
+			const column = state.provider === 'analytics' ? 'google_analytics_json' : 'google_search_console_json';
+			await getDb(event).prepare(`UPDATE listing_details SET ${column} = ?, updated_at = CURRENT_TIMESTAMP WHERE listing_id = ?`).bind(JSON.stringify(summary), Number(state.listingId)).run();
+			return Response.redirect(`${envFrom(event).APP_URL || event.url.origin}/product/${encodeURIComponent(String(state.listingId))}?google=connected`, 302);
+		} catch (error: any) { return new Response(`Google connection failed: ${error?.message || 'unknown error'}`, { status: 400, headers: { 'content-type': 'text/plain; charset=utf-8' } }); }
+	}
+
 	if (segments[0] === 'stripe' && segments[1] === 'search' && method === 'POST') {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const input = await body(event); let key: string;
 		try { key = await storedStripeKey(event, user.id, String(input.stripeKey || '')); } catch (error: any) { return json({ error: error?.message || 'Stripe key is required' }, 400); }
@@ -544,7 +723,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 			await getDb(event).prepare('INSERT INTO stripe_connections (seller_id, encrypted_key, last_verified_at) VALUES (?, ?, ?) ON CONFLICT(seller_id) DO UPDATE SET encrypted_key=excluded.encrypted_key, last_verified_at=excluded.last_verified_at').bind(user.id, encrypted, now()).run();
 			await getDb(event).prepare('INSERT INTO stripe_product_mappings (listing_id, stripe_product_id, stripe_product_ids, stripe_price_ids, product_name) VALUES (?, ?, ?, ?, ?) ON CONFLICT(listing_id) DO UPDATE SET stripe_product_id=excluded.stripe_product_id, stripe_product_ids=excluded.stripe_product_ids, stripe_price_ids=excluded.stripe_price_ids, product_name=excluded.product_name, updated_at=CURRENT_TIMESTAMP').bind(listingId, productIds[0], JSON.stringify(productIds), JSON.stringify(priceIds), `${listing.name} (${productIds.length} Stripe Products)`).run();
 			await getDb(event).prepare('UPDATE listings SET mrr_cents = ?, mrr_status = ?, verified_at = ?, updated_at = ? WHERE id = ? AND seller_id = ?').bind(metrics.mrr.cents, metrics.mrr.cents === 0 ? 'zero' : 'verified', now(), now(), listingId, user.id).run();
-			if (metrics.revenueAvailable) await getDb(event).prepare('UPDATE listing_details SET total_revenue_cents = ?, last_30d_revenue_cents = ?, active_customers = ?, updated_at = CURRENT_TIMESTAMP WHERE listing_id = ?').bind(metrics.totalRevenue, metrics.last30dRevenue, metrics.activeCustomers, listingId).run();
+			if (metrics.revenueAvailable) await getDb(event).prepare('UPDATE listing_details SET total_revenue_cents = ?, last_30d_revenue_cents = ?, revenue_daily_json = ?, active_customers = ?, updated_at = CURRENT_TIMESTAMP WHERE listing_id = ?').bind(metrics.totalRevenue, metrics.last30dRevenue, JSON.stringify(metrics.revenueDaily), metrics.activeCustomers, listingId).run();
 			await getDb(event).prepare('INSERT INTO mrr_snapshots (listing_id, mrr_cents, currency, methodology) VALUES (?, ?, ?, ?)').bind(listingId, metrics.mrr.cents, metrics.mrr.currency, `All ${priceIds.length} Prices across ${productIds.length} Stripe Products matching the listing family; recurring subscriptions normalized monthly; product-attributed paid invoices and one-time Checkout revenue included when the restricted key permits access.`).run();
 			await audit(event, user.id, 'listing.mrr_verified', 'listing', String(listingId), { productIds, priceCount: priceIds.length, priceIds, mrrCents: metrics.mrr.cents, revenueAvailable: metrics.revenueAvailable });
 			return json({ mrr: metrics.mrr.cents / 100, currency: metrics.mrr.currency, productCount: productIds.length, priceCount: priceIds.length, totalRevenue: metrics.totalRevenue == null ? null : metrics.totalRevenue / 100, last30dRevenue: metrics.last30dRevenue == null ? null : metrics.last30dRevenue / 100, activeCustomers: metrics.activeCustomers, verifiedAt: now() });
@@ -556,13 +735,33 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const listing = await getDb(event).prepare("SELECT id, name, seller_id FROM listings WHERE id = ? AND seller_id = ? AND status = 'published'").bind(listingId, user.id).first<any>();
 		if (!listing) return json({ error: 'Published listing not found' }, 404);
 		const input = await body(event); const desiredRank = Math.max(1, Math.min(330, Number(input.desiredRank || 1)));
-		const activeBids = await getDb(event).prepare("SELECT amount_cents FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC").bind(now()).all<{ amount_cents: number }>();
-		const minimum = activeBids.results?.length ? Number(activeBids.results[Math.min(desiredRank - 1, activeBids.results.length - 1)]?.amount_cents || 0) + 50 : 200; const amount = asCents(input.amount);
+		await getDb(event).prepare('DELETE FROM rank_reservations WHERE reserved_until <= ?').bind(now()).run();
+			const activeBids = await getDb(event).prepare("SELECT amount_cents FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC").bind(now()).all<{ amount_cents: number }>();
+			const targetBid = activeBids.results?.[desiredRank - 1]; const minimum = targetBid ? Number(targetBid.amount_cents) + 50 : 200; const amount = asCents(input.amount);
 		if (amount < minimum) return json({ error: `Minimum bid for this position is $${(minimum / 100).toFixed(2)}`, minimum: minimum / 100 }, 400);
 		const stripeKey = envFrom(event).STRIPE_SECRET_KEY; if (!stripeKey) return json({ error: 'Bid payments are not configured yet. Add STRIPE_SECRET_KEY to this Worker.' }, 503);
-		const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); const pending = await getDb(event).prepare('INSERT INTO bids (listing_id, seller_id, amount_cents, expires_at) VALUES (?, ?, ?, ?)').bind(listingId, user.id, amount, expires).run();
-		const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `BidLadders rank boost: ${listing.name}`, 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=cancelled`, 'metadata[type]': 'rank_bid', 'metadata[bid_id]': String(pending.meta.last_row_id), 'metadata[listing_id]': String(listingId), 'metadata[desired_rank]': String(desiredRank) }));
-		await getDb(event).prepare('UPDATE bids SET checkout_session_id = ? WHERE id = ?').bind(session.id, pending.meta.last_row_id).run(); return json({ url: session.url, sessionId: session.id });
+			const expires = new Date(Date.now() + CAROUSEL_RESERVATION_MS).toISOString(); const pending = await getDb(event).prepare('INSERT INTO bids (listing_id, seller_id, amount_cents, desired_rank, expires_at) VALUES (?, ?, ?, ?, ?)').bind(listingId, user.id, amount, desiredRank, expires).run(); const bidId = Number(pending.meta.last_row_id);
+			try { await getDb(event).prepare('INSERT INTO rank_reservations (desired_rank, bid_id, reserved_until) VALUES (?, ?, ?)').bind(desiredRank, bidId, expires).run(); }
+			catch { await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run(); return json({ error: 'Another checkout is already holding that rank. Choose another position or wait for it to expire.' }, 409); }
+			try {
+				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `BidLadders rank boost: ${listing.name}`, 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=cancelled`, 'metadata[type]': 'rank_bid', 'metadata[bid_id]': String(bidId), 'metadata[listing_id]': String(listingId), 'metadata[desired_rank]': String(desiredRank) }));
+				await getDb(event).prepare('UPDATE bids SET checkout_session_id = ? WHERE id = ?').bind(session.id, bidId).run(); return json({ url: session.url, sessionId: session.id });
+			} catch (error) { await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run(); await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run(); throw error; }
+	}
+
+	if (route === 'escrow/webhook' && method === 'POST') {
+		const expected = envFrom(event).ESCROW_WEBHOOK_SECRET;
+		if (!expected || event.url.searchParams.get('secret') !== expected) return json({ error: 'Invalid webhook secret' }, 401);
+		const payload = await body(event); const transactionId = String(payload.transaction_id || '');
+		if (!/^\d+$/.test(transactionId)) return json({ error: 'transaction_id is required' }, 400);
+		try {
+			const transaction = await getEscrowTransaction(event, transactionId); const deal = await getDb(event).prepare('SELECT id FROM deals WHERE escrow_transaction_id = ?').bind(transactionId).first<{ id: number }>();
+			if (!deal) return json({ received: true });
+			const status = verifiedEscrowStatus(transaction as Record<string, any>);
+			if (!status) return json({ received: true, verified: true, updated: false });
+			await getDb(event).prepare('UPDATE deals SET escrow_status = ?, escrow_updated_at = ?, updated_at = ? WHERE id = ?').bind(status, now(), now(), deal.id).run();
+			return json({ received: true, verified: true, updated: true });
+		} catch (error: any) { return json({ error: error?.message || 'Escrow webhook verification failed' }, 400); }
 	}
 
 	if (route === 'stripe/webhook' && method === 'POST') {
@@ -570,8 +769,8 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!signature || !secret || !(await verifyStripeSignature(raw, signature, secret))) return json({ error: 'Invalid Stripe signature' }, 401);
 		const stripeEvent = JSON.parse(raw);
 		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'rank_bid') {
-			const session = stripeEvent.data.object; const bidId = Number(session.metadata.bid_id); const bid = await getDb(event).prepare("SELECT id, seller_id FROM bids WHERE id = ? AND status = 'pending'").bind(bidId).first<any>();
-			if (bid) { const started = now(); const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); await getDb(event).prepare("UPDATE bids SET status = 'paid', paid_at = ?, starts_at = ?, expires_at = ?, checkout_session_id = ? WHERE id = ?").bind(started, started, expires, session.id, bidId).run(); await audit(event, bid.seller_id, 'bid.paid', 'bid', String(bidId), { checkoutSessionId: session.id }); }
+			const session = stripeEvent.data.object; const bidId = Number(session.metadata.bid_id); const bid = await getDb(event).prepare("SELECT id, listing_id, seller_id FROM bids WHERE id = ? AND status = 'pending' AND expires_at > ?").bind(bidId, now()).first<any>();
+			if (bid && ['paid', 'no_payment_required'].includes(String(session.payment_status || 'paid'))) { const started = now(); await getDb(event).prepare("UPDATE bids SET status = 'paid', paid_at = ?, starts_at = ?, expires_at = ?, checkout_session_id = ? WHERE id = ? AND status = 'pending'").bind(started, started, PERMANENT_BID_EXPIRY, session.id, bidId).run(); await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run(); await getDb(event).prepare("UPDATE bids SET status = 'expired' WHERE listing_id = ? AND id <> ? AND status = 'paid'").bind(bid.listing_id, bidId).run(); await audit(event, bid.seller_id, 'bid.paid', 'bid', String(bidId), { checkoutSessionId: session.id, replacedPreviousBid: true }); }
 		}
 		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
 			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, seller_id, reservation_id FROM carousel_orders WHERE id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id)).first<any>();
@@ -584,16 +783,22 @@ async function handle(event: RequestEvent): Promise<Response> {
 			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, reservation_id FROM carousel_orders WHERE id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id)).first<any>();
 			if (order) { await carouselRequest(event, Number(order.slot_id), '/release', { reservationId: order.reservation_id }).catch(() => undefined); await getDb(event).prepare("UPDATE carousel_orders SET status = 'expired' WHERE id = ?").bind(order.id).run(); }
 		}
+		if (stripeEvent.type === 'checkout.session.expired' && stripeEvent.data.object.metadata?.type === 'rank_bid') {
+			const session = stripeEvent.data.object;
+			await getDb(event).prepare("UPDATE bids SET status = 'expired' WHERE id = ? AND status = 'pending'").bind(Number(session.metadata.bid_id)).run(); await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(Number(session.metadata.bid_id)).run();
+		}
 		return json({ received: true });
 	}
 
 	if (route === 'deals' && method === 'GET') {
-		const user = await requireUser(event); const result = await getDb(event).prepare('SELECT d.id, d.buyer_id, d.seller_id, d.status, d.offer_cents, d.escrow_provider, d.escrow_transaction_id, d.escrow_status, d.created_at, d.updated_at, l.id AS listing_id, l.name AS listing_name, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.buyer_id = ? OR d.seller_id = ? ORDER BY d.updated_at DESC').bind(user.id, user.id).all<any>();
+		const user = await requireUser(event); const result = await getDb(event).prepare('SELECT d.id, d.buyer_id, d.seller_id, d.status, d.offer_cents, d.escrow_provider, d.escrow_transaction_id, d.escrow_status, d.escrow_url, d.created_at, d.updated_at, l.id AS listing_id, l.name AS listing_name, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.seller_id = ? OR (d.buyer_id = ? AND d.buyer_visible = 1) ORDER BY d.updated_at DESC').bind(user.id, user.id).all<any>();
 		return json({ deals: (result.results ?? []).map((deal: any) => ({ ...deal, offer: deal.offer_cents / 100 })) });
 	}
 
 	if (segments[0] === 'deals' && segments[1] === 'offer' && method === 'POST') {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'buyer'); if (roleError) return roleError; const input = await body(event);
+		const buyerProfile = await getDb(event).prepare('SELECT user_id FROM buyer_profiles WHERE user_id = ?').bind(user.id).first();
+		if (!buyerProfile) return json({ error: 'Complete buyer onboarding before contacting a seller' }, 400);
 		const listing = await getDb(event).prepare("SELECT id, seller_id FROM listings WHERE id = ? AND status = 'published'").bind(Number(input.listingId)).first<{ id: number; seller_id: number }>();
 		if (!listing || listing.seller_id === user.id) return json({ error: 'Published listing not found' }, 404);
 		const message = String(input.message || '').trim(); if (!message) return json({ error: 'Include a message with your offer' }, 400);
@@ -602,7 +807,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 	}
 
 	if (segments[0] === 'deals' && segments[1] && !segments[2] && method === 'GET') {
-		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT d.*, l.name AS listing_name, l.product_url, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.id = ? AND (d.buyer_id = ? OR d.seller_id = ?)').bind(Number(segments[1]), user.id, user.id).first<any>();
+		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT d.*, l.name AS listing_name, l.product_url, buyer.username AS buyer_username, seller.username AS seller_username FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.id = ? AND (d.seller_id = ? OR (d.buyer_id = ? AND d.buyer_visible = 1))').bind(Number(segments[1]), user.id, user.id).first<any>();
 		return deal ? json({ deal: { ...deal, offer: deal.offer_cents / 100 } }) : json({ error: 'Deal not found' }, 404);
 	}
 
@@ -616,30 +821,64 @@ async function handle(event: RequestEvent): Promise<Response> {
 		return json({ ok: true, status: 'accepted' });
 	}
 
+	if (segments[0] === 'deals' && segments[1] && segments[2] === 'cancel' && method === 'POST') {
+		const user = await requireUser(event);
+		const deal = await getDb(event).prepare("SELECT id, buyer_id, status FROM deals WHERE id = ? AND buyer_id = ? AND buyer_visible = 1").bind(Number(segments[1]), user.id).first<any>();
+		if (!deal) return json({ error: 'Deal not found' }, 404);
+		if (['cancelled', 'closed'].includes(deal.status)) return json({ ok: true, status: deal.status });
+		await getDb(event).prepare("UPDATE deals SET status = 'cancelled', buyer_visible = 0, cancelled_at = ?, updated_at = ? WHERE id = ? AND buyer_id = ?").bind(now(), now(), deal.id, user.id).run();
+		await audit(event, user.id, 'deal.cancelled_by_buyer', 'deal', String(deal.id));
+		return json({ ok: true, status: 'cancelled' });
+	}
+
 	if (segments[0] === 'deals' && segments[1] && segments[2] === 'escrow' && method === 'POST') {
 		const user = await requireUser(event);
-		const deal = await getDb(event).prepare("SELECT d.*, l.name AS listing_name, l.product_url, buyer.contact_email AS buyer_email, seller.contact_email AS seller_email FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.id = ? AND (d.buyer_id = ? OR d.seller_id = ?)").bind(Number(segments[1]), user.id, user.id).first<any>();
+		const deal = await getDb(event).prepare("SELECT d.*, l.name AS listing_name, l.product_url, buyer.contact_email AS buyer_email, seller.contact_email AS seller_email FROM deals d JOIN listings l ON l.id = d.listing_id JOIN users buyer ON buyer.id = d.buyer_id JOIN users seller ON seller.id = d.seller_id WHERE d.id = ? AND (d.seller_id = ? OR (d.buyer_id = ? AND d.buyer_visible = 1))").bind(Number(segments[1]), user.id, user.id).first<any>();
 		if (!deal) return json({ error: 'Deal not found' }, 404);
 		if (deal.status !== 'accepted') return json({ error: 'The seller must accept the deal before escrow can start' }, 409);
 		if (deal.escrow_transaction_id) return json({ escrow: { provider: deal.escrow_provider, transactionId: deal.escrow_transaction_id, status: deal.escrow_status, url: deal.escrow_url } });
 		if (!deal.buyer_email || !deal.seller_email) return json({ error: 'Both buyer and seller must add an escrow contact email in Profile' }, 400);
 		const amountCents = Math.max(1, Number(deal.offer_cents));
-		const escrow = await createEscrowTransaction(event, { buyerEmail: deal.buyer_email, sellerEmail: deal.seller_email, title: deal.listing_name, description: `Product acquisition for ${deal.listing_name}`, merchantUrl: `${envFrom(event).APP_URL || event.url.origin}/product/${deal.listing_id}`, amountCents, platformFeeCents: platformFeeForAmount(amountCents) });
+			const platformFeeCents = platformFeeForAmount(amountCents); const escrow = await createEscrowTransaction(event, { buyerEmail: deal.buyer_email, sellerEmail: deal.seller_email, title: deal.listing_name, description: `Product acquisition for ${deal.listing_name}`, merchantUrl: `${envFrom(event).APP_URL || event.url.origin}/product/${deal.listing_id}`, amountCents, platformFeeCents });
 		const transactionId = String(escrow.id || '');
 		if (!transactionId) throw new Error('Escrow.com did not return a transaction id');
-		const updatedAt = now();
-		await getDb(event).prepare("UPDATE deals SET escrow_provider = 'escrow.com', escrow_transaction_id = ?, escrow_status = 'created', escrow_updated_at = ?, updated_at = ? WHERE id = ? AND escrow_transaction_id IS NULL").bind(transactionId, updatedAt, updatedAt, deal.id).run();
+			const webLink = await escrowWebLink(event, transactionId, 'agree').catch(() => ({} as any)); const escrowUrl = String(webLink.landing_page || ''); const updatedAt = now();
+			await getDb(event).prepare("UPDATE deals SET escrow_provider = 'escrow.com', escrow_transaction_id = ?, escrow_status = 'created', escrow_url = ?, escrow_updated_at = ?, updated_at = ? WHERE id = ? AND escrow_transaction_id IS NULL").bind(transactionId, escrowUrl || null, updatedAt, updatedAt, deal.id).run();
 		await audit(event, user.id, 'deal.escrow_created', 'deal', String(deal.id), { provider: 'escrow.com', transactionId, amountCents, platformFeeCents: platformFeeForAmount(amountCents) });
-		return json({ escrow: { provider: 'escrow.com', transactionId, status: 'created', url: null } });
+			return json({ escrow: { provider: 'escrow.com', transactionId, status: 'created', url: escrowUrl || null } });
 	}
 
-	if (segments[0] === 'deals' && segments[1] && segments[2] === 'messages' && method === 'GET') {
-		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT id FROM deals WHERE id = ? AND (buyer_id = ? OR seller_id = ?)').bind(Number(segments[1]), user.id, user.id).first(); if (!deal) return json({ error: 'Deal not found' }, 404);
-		const messages = await getDb(event).prepare('SELECT m.id, m.body, m.created_at, u.username FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.deal_id = ? ORDER BY m.created_at ASC').bind(Number(segments[1])).all<any>(); return json({ messages: messages.results ?? [] });
+	if (segments[0] === 'deals' && segments[1] && segments[2] === 'messages' && !segments[3] && method === 'GET') {
+		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT id FROM deals WHERE id = ? AND (seller_id = ? OR (buyer_id = ? AND buyer_visible = 1))').bind(Number(segments[1]), user.id, user.id).first(); if (!deal) return json({ error: 'Deal not found' }, 404);
+		const messages = await getDb(event).prepare('SELECT m.id, m.body, m.created_at, u.username FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.deal_id = ? ORDER BY m.created_at ASC').bind(Number(segments[1])).all<any>();
+		const media = await getDb(event).prepare('SELECT mm.message_id, mm.object_key, mm.mime_type, mm.byte_size FROM message_media mm JOIN messages m ON m.id = mm.message_id WHERE m.deal_id = ? ORDER BY mm.id ASC').bind(Number(segments[1])).all<any>();
+		const mediaByMessage = new Map<number, any[]>(); for (const item of media.results ?? []) mediaByMessage.set(Number(item.message_id), [...(mediaByMessage.get(Number(item.message_id)) || []), { url: `/api/media/message?key=${encodeURIComponent(item.object_key)}`, mime_type: item.mime_type, byte_size: item.byte_size }]);
+		return json({ messages: (messages.results ?? []).map((message: any) => ({ ...message, media: mediaByMessage.get(Number(message.id)) || [] })) });
 	}
 
-	if (segments[0] === 'deals' && segments[1] && segments[2] === 'messages' && method === 'POST') {
-		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT id FROM deals WHERE id = ? AND (buyer_id = ? OR seller_id = ?)').bind(Number(segments[1]), user.id, user.id).first(); if (!deal) return json({ error: 'Deal not found' }, 404);
+	if (segments[0] === 'deals' && segments[1] && segments[2] === 'messages' && segments[3] === 'media' && method === 'POST') {
+		const user = await requireUser(event);
+		const dealId = Number(segments[1]);
+		const deal = await getDb(event).prepare('SELECT id FROM deals WHERE id = ? AND (seller_id = ? OR (buyer_id = ? AND buyer_visible = 1))').bind(dealId, user.id, user.id).first();
+		if (!deal) return json({ error: 'Deal not found' }, 404);
+		try {
+			const form = await event.request.formData();
+			const file = form.get('media');
+			if (!(file instanceof File) || !file.size) return json({ error: 'Select a media file' }, 400);
+			if (file.size > MAX_MESSAGE_MEDIA_BYTES) return json({ error: 'Media must be 1MB or smaller' }, 400);
+			if (!MESSAGE_MEDIA_TYPES.has(file.type)) return json({ error: 'Unsupported media type' }, 400);
+			const key = `messages/${dealId}/${crypto.randomUUID()}.${extensionFor(file.type)}`;
+			await mediaBucket(event).put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type, cacheControl: 'private, max-age=3600' } });
+			const message = String(form.get('body') || '').trim().slice(0, 5000) || 'Media attachment';
+			const result = await getDb(event).prepare('INSERT INTO messages (deal_id, sender_id, body) VALUES (?, ?, ?)').bind(dealId, user.id, message).run();
+			await getDb(event).prepare('INSERT INTO message_media (message_id, object_key, mime_type, byte_size) VALUES (?, ?, ?, ?)').bind(result.meta.last_row_id, key, file.type, file.size).run();
+			await getDb(event).prepare('UPDATE deals SET updated_at = ? WHERE id = ?').bind(now(), dealId).run();
+			return json({ ok: true, messageId: result.meta.last_row_id });
+		} catch (error: any) { return json({ error: error?.message || 'Media upload failed' }, 400); }
+	}
+
+	if (segments[0] === 'deals' && segments[1] && segments[2] === 'messages' && !segments[3] && method === 'POST') {
+		const user = await requireUser(event); const deal = await getDb(event).prepare('SELECT id FROM deals WHERE id = ? AND (seller_id = ? OR (buyer_id = ? AND buyer_visible = 1))').bind(Number(segments[1]), user.id, user.id).first(); if (!deal) return json({ error: 'Deal not found' }, 404);
 		const input = await body(event); const message = String(input.body || '').trim(); if (!message || message.length > 5000) return json({ error: 'Message must be 1-5000 characters' }, 400);
 		await getDb(event).prepare('INSERT INTO messages (deal_id, sender_id, body) VALUES (?, ?, ?)').bind(Number(segments[1]), user.id, message).run(); await getDb(event).prepare('UPDATE deals SET updated_at = ? WHERE id = ?').bind(now(), Number(segments[1])).run(); return json({ ok: true });
 	}

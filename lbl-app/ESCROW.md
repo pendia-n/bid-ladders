@@ -9,7 +9,7 @@ BidLadders uses Escrow.com as a configuration-gated third-party provider. The Wo
 - Escrow.com fees split equally between buyer and seller;
 - a `partner_fee` item for the BidLadders marketplace fee using the current tiers: 8% below $10,000, 3.5% from $10,000 to below $50,000, and 1.7% from $50,000 upward.
 
-The buyer and seller must each save a contact email under Profile. BidLadders stores the Escrow transaction ID and status on the private deal record. The provider, not BidLadders, receives and disburses the acquisition funds.
+The buyer and seller must each save a contact email under Profile. BidLadders stores the Escrow transaction ID, hosted agreement link, and provider-verified status on the private deal record. The provider, not BidLadders, receives and disburses the acquisition funds.
 
 ## Worker setup
 
@@ -18,6 +18,7 @@ Create an Escrow.com account, request API access/partner approval, and test in t
 ```text
 ESCROW_API_EMAIL
 ESCROW_API_KEY
+ESCROW_WEBHOOK_SECRET
 ```
 
 For sandbox testing, add the non-secret variable `ESCROW_API_BASE_URL` with:
@@ -26,19 +27,22 @@ For sandbox testing, add the non-secret variable `ESCROW_API_BASE_URL` with:
 https://api.escrow-sandbox.com/2017-09-01
 ```
 
-Production uses `https://api.escrow.com/2017-09-01` by default. Apply migration `0008_escrow_and_contact_email.sql` before enabling the endpoint.
+Production uses `https://api.escrow.com/2017-09-01` by default. Apply migrations `0008_escrow_and_contact_email.sql`, `0009_marketplace_integrations.sql`, `0010_public_metrics_opt_in.sql`, and `0011_rank_reservations.sql` before enabling the endpoint. The current remote database has all four applied. `ESCROW_WEBHOOK_SECRET` is a BidLadders-created random secret used in the registered webhook URL; it is not an Escrow.com API credential.
 
 ## Deal flow
 
 1. Buyer completes buyer onboarding and sends an offer.
 2. Buyer and seller negotiate in the private room.
 3. Seller clicks **Accept deal**.
-4. Either party clicks **Start escrow**. The Worker creates one Escrow.com transaction and prevents a second transaction for the same deal.
-5. Buyer and seller agree to the Escrow.com terms, buyer funds the transaction, seller transfers the agreed product assets, and buyer inspects them.
-6. Buyer accepts the delivered product in Escrow.com. Escrow.com disburses the sale amount to the seller and the partner fee to BidLadders after its process and fees.
+4. Either party clicks **Start escrow**. The Worker creates one Escrow.com transaction, requests an agreement link, and prevents a second transaction for the same deal.
+5. Register `https://<your-worker-host>/api/escrow/webhook?secret=<ESCROW_WEBHOOK_SECRET>` in Escrow.com. The webhook only triggers a server-side transaction fetch; local status is updated from Escrow.com data, not from the untrusted webhook body.
+6. Buyer and seller agree to the Escrow.com terms, buyer funds the transaction, seller transfers the agreed product assets, and buyer inspects them.
+7. Buyer accepts the delivered product in Escrow.com. Escrow.com disburses the sale amount to the seller and the partner fee to BidLadders after its process and fees.
 
-The current MVP does not decide whether code, domains, accounts, data, or customer contracts have transferred. The deal room must record the exact asset list, transfer method, representations, inspection period, and dispute terms before escrow is started.
+The current MVP does not decide whether code, domains, accounts, data, or customer contracts have transferred. The deal room must record the exact asset list, transfer method, representations, inspection period, and dispute terms before escrow is started. Escrow.com account approval and a sandbox transaction are still required before calling this production-ready.
 
 ## Stripe boundary
 
 The existing Stripe account is for BidLadders' own $10 spot and rank payments. It is not the acquisition escrow account. Do not send a $5,000,000 acquisition through that Checkout flow. If Stripe is later used for marketplace payments instead of Escrow.com, Connect onboarding, seller verification, payout, refunds, disputes, tax, and negative-balance responsibilities must be designed separately.
+
+Escrow.com does not publish a separate per-request API charge in the API documentation. Do not interpret that as free transactions: Escrow.com transaction, payment-method, and any account-specific partner terms still apply. Confirm commercial terms with Escrow.com before launch.

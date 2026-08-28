@@ -42,7 +42,7 @@ export function platformFeeForAmount(amountCents: number) {
 
 export async function createEscrowTransaction(event: RequestEvent, input: EscrowInput) {
 	const amount = Math.max(1, Math.round(input.amountCents));
-	const platformFee = Math.max(0, Math.min(tieredPlatformFeeCents(amount), amount));
+	const platformFee = Math.max(0, Math.min(Math.round(input.platformFeeCents), amount));
 	const inspectionDays = Math.min(30, Math.max(1, Math.round(input.inspectionDays || 3)));
 	const items: Record<string, unknown>[] = [{
 		title: input.title.slice(0, 200),
@@ -62,7 +62,6 @@ export async function createEscrowTransaction(event: RequestEvent, input: Escrow
 		title: 'BidLadders marketplace fee',
 		description: 'Marketplace fee for facilitating this product acquisition.',
 		type: 'partner_fee',
-		parent_reference: input.title.slice(0, 24),
 		schedule: [{ amount: platformFee / 100, payer_customer: input.buyerEmail, beneficiary_customer: 'me' }]
 	});
 	return escrowRequest(event, '/transaction', {
@@ -74,6 +73,11 @@ export async function createEscrowTransaction(event: RequestEvent, input: Escrow
 			items
 		})
 	});
+}
+
+export async function getEscrowTransaction(event: RequestEvent, transactionId: string) {
+	if (!/^\d+$/.test(transactionId)) throw new Error('Invalid Escrow transaction id');
+	return escrowRequest(event, `/transaction/${transactionId}`);
 }
 
 export async function escrowWebLink(event: RequestEvent, transactionId: string, action: string) {
