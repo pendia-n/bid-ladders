@@ -5,7 +5,7 @@
 </script>
 
 <svelte:head>
-	<title>BidLadders — small products, visible opportunities</title>
+	<title>BidLadders — explore products, find your next opportunity</title>
 	<meta name="description" content="Product-level MRR verification and a transparent acquisition ranking for small internet businesses." />
 </svelte:head>
 

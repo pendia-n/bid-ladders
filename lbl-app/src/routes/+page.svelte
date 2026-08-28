@@ -309,7 +309,7 @@
 		<section class="masthead">
 			<div>
 				<p class="eyebrow">PRODUCT-LEVEL ACQUISITIONS</p>
-				<h1>Small products,<br /><em>visible opportunities.</em></h1>
+				<h1>Explore products.<br /><em>Find your next opportunity.</em></h1>
 				<p class="lede">A transparent board for buying and selling one product at a time. Verified signals when available, honest context when they are not.</p>
 			</div>
 			<div class="masthead-note"><span class="signal-dot"></span><span>Two ladders<br /><strong>330 positions</strong></span></div>
