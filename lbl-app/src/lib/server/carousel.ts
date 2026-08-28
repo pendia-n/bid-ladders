@@ -39,6 +39,7 @@ export class CarouselSlot {
 			return Response.json({ slot: record });
 		}
 		if (url.pathname === '/confirm') {
+			if (current.status === 'paid' && current.reservationId === String(input.reservationId)) return Response.json({ slot: current });
 			if (current.status !== 'reserved' || current.reservationId !== String(input.reservationId)) return Response.json({ error: 'Carousel reservation is no longer valid' }, { status: 409 });
 			const record: SlotRecord = { ...current, status: 'paid', startsAt: timestamp, expiresAt: timestamp + placementMs };
 			await this.ctx.storage.put('slot', record);
