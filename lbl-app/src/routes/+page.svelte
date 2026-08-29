@@ -349,6 +349,52 @@
 			{:else}<div class="deal-layout"><div class="deal-list">{#if !deals.length}<div class="empty-state compact"><strong>No deal rooms yet.</strong><span>Buyer offers create the first room.</span></div>{/if}{#each deals as deal}<button class="deal-row" class:selected={selectedDeal?.id === deal.id} onclick={() => openDeal(deal)}><span><strong>{deal.listing_name}</strong><small>{deal.buyer_username} ↔ {deal.seller_username}</small></span><span class="deal-amount">{money(deal.offer)}<small>{deal.status}</small></span></button>{/each}</div><div class="conversation">{#if selectedDeal}<div class="conversation-head"><div><p class="eyebrow">DEAL #{selectedDeal.id}</p><h3>{selectedDeal.listing_name}</h3></div><span class="status-tag">{selectedDeal.status}</span></div><div class="deal-actions">{#if user.id === selectedDeal.seller_id && ["inquiry", "negotiating"].includes(selectedDeal.status)}<button class="button dark" onclick={acceptDeal}>Accept deal</button>{/if}{#if user.id === selectedDeal.buyer_id && selectedDeal.status !== "cancelled"}<button class="button ghost" onclick={cancelDeal}>Close my room</button>{/if}{#if selectedDeal.status === "accepted" && !selectedDeal.escrow_transaction_id}<button class="button yellow" onclick={startEscrow}>Start escrow</button>{/if}{#if selectedDeal.escrow_url}<a class="button ghost" href={selectedDeal.escrow_url} target="_blank" rel="noreferrer">Continue in Escrow.com ↗</a>{/if}</div>{#if selectedDeal.status !== "cancelled"}<div class="messages">{#each messages as message}<div class:mine={message.username === user.username} class="message"><small>@{message.username} · {new Date(message.created_at).toLocaleString()}</small><p>{message.body}</p>{#each message.media || [] as attachment}<a class="message-media" href={attachment.url} target="_blank" rel="noreferrer">{attachment.mime_type.startsWith('image/') ? 'View image' : 'Open attachment'}</a>{/each}</div>{/each}</div><form class="message-box" onsubmit={(event) => { event.preventDefault(); messageFile ? sendMessageMedia() : sendMessage(); }}><input bind:value={messageDraft} placeholder="Write a negotiation note..." /><label class="button ghost upload-button" for="message-media">Attach</label><input id="message-media" class="visually-hidden" type="file" accept="image/*,video/*,audio/*,application/pdf" onchange={chooseMessageFile} />{#if messageFile}<small class="file-note">{messageFile.name}</small>{/if}<button class="button dark" type="submit">Send</button></form>{:else}<div class="empty-state compact"><strong>This buyer room is closed.</strong><span>Message history remains preserved.</span></div>{/if}{:else}<div class="empty-state"><strong>Select a deal room.</strong><span>Offers and replies stay connected to the listing.</span></div>{/if}</div></div>{/if}
 		{:else}
 				<section class="workspace-heading"><div><p class="eyebrow">{view === 'market' ? 'THE FIRST 330' : 'SEARCHABLE ARCHIVE'}</p><h2>{view === 'market' ? 'The board is the product.' : 'Every listing stays discoverable.'}</h2></div><p>{view === 'market' ? 'Paid ranks stay until another buyer outbids them. Free listings still earn their place by being early.' : 'Use the name filter to find listings beyond the homepage board.'}</p></section>
+			{#if loading}
+				<div class="empty-state"><strong>Loading the board...</strong></div>
+			{:else if !listings.length}
+				<div class="empty-state"><strong>No listings match that search.</strong><span>Be the first product on the board.</span>{#if user?.role === 'seller'}<button class="button coral" onclick={openNewListing}>List a product</button>{/if}</div>
+			{:else}
+				<div class="ladder-grid">
+					<section class="ladder">
+						<div class="ladder-head"><span class="ladder-label">LADDER A</span><strong>01—165</strong></div>
+						{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 0) as listing}
+							<article class="listing-row" class:sponsored={listing.is_sponsored}>
+								<div class="rank">{String(listing.rank).padStart(3, '0')}</div>
+								<div class="listing-main">
+									{#if listing.product_icon_url || listing.images?.[0]}<img class="listing-thumb" src={listing.product_icon_url || listing.images?.[0]} alt="" />{/if}
+									<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={`/product/${listing.id}`}>{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div>
+									<p>{listing.summary}</p>
+									<div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div>
+								</div>
+								<div class="row-actions">
+									<a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>
+									{#if user?.role === 'buyer' && listing.seller_id !== user.id}<button class="icon-button" title="Make an offer" aria-label="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}
+									{#if user?.role === 'seller' && listing.seller_id === user.id}<button class="icon-button bid" title="Boost this listing" aria-label="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button><button class="icon-button" title="Edit listing" aria-label="Edit listing" onclick={() => openEditListing(listing)}>✎</button><button class="icon-button" title="Verify all Stripe Prices" aria-label="Verify all Stripe Prices" onclick={() => openStripeForListing(listing)}>✓</button><button class="icon-button danger" title="Remove listing" aria-label="Remove listing" onclick={() => deleteListing(listing)}>×</button>{/if}
+								</div>
+							</article>
+						{/each}
+					</section>
+					<section class="ladder">
+						<div class="ladder-head"><span class="ladder-label">LADDER B</span><strong>166—330</strong></div>
+						{#each listings.filter((_, index) => (view === 'mrr' || index < 330) && index % 2 === 1) as listing}
+							<article class="listing-row" class:sponsored={listing.is_sponsored}>
+								<div class="rank">{String(listing.rank).padStart(3, '0')}</div>
+								<div class="listing-main">
+									{#if listing.product_icon_url || listing.images?.[0]}<img class="listing-thumb" src={listing.product_icon_url || listing.images?.[0]} alt="" />{/if}
+									<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={`/product/${listing.id}`}>{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div>
+									<p>{listing.summary}</p>
+									<div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div>
+								</div>
+								<div class="row-actions">
+									<a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>
+									{#if user?.role === 'buyer' && listing.seller_id !== user.id}<button class="icon-button" title="Make an offer" aria-label="Make an offer" onclick={() => { offerListing = listing; modal = 'offer'; }}>↗</button>{/if}
+									{#if user?.role === 'seller' && listing.seller_id === user.id}<button class="icon-button bid" title="Boost this listing" aria-label="Boost this listing" onclick={() => { bidListing = listing; modal = 'bid'; }}>↑</button><button class="icon-button" title="Edit listing" aria-label="Edit listing" onclick={() => openEditListing(listing)}>✎</button><button class="icon-button" title="Verify all Stripe Prices" aria-label="Verify all Stripe Prices" onclick={() => openStripeForListing(listing)}>✓</button><button class="icon-button danger" title="Remove listing" aria-label="Remove listing" onclick={() => deleteListing(listing)}>×</button>{/if}
+								</div>
+							</article>
+						{/each}
+					</section>
+				</div>
+			{/if}
 		{/if}
 	</main>
 
