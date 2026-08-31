@@ -5,7 +5,7 @@
 	type User = { id: number; username: string; role: Role; totp_enabled: boolean; profile_image_key?: string | null; display_name?: string | null; bio?: string | null; website?: string | null; country?: string | null; timezone?: string | null };
 	type Listing = {
 		id: number; seller_id: number; name: string; summary: string; description?: string; product_url: string;
-		asking_price: number; mrr: number; mrr_status: string; operating_cost: number;
+		asking_price: number; mrr: number; mrr_status: string; operating_cost: number; for_sale: boolean;
 		assets_included: string; seller_username: string; rank: number; visible_on_home: boolean;
 		is_sponsored: boolean; paid_bid: number | null; verified_at?: string; seller_profile_image_url?: string; product_icon_url?: string | null; images?: string[];
 		category?: string | null; problem_solved?: string | null; audience?: string | null; pricing_model?: string | null; tech_stack?: string | null;
@@ -48,6 +48,7 @@
 	let formAssets = $state('');
 	let formMrrStatus = $state('unknown');
 	let formPublish = $state(true);
+	let formForSale = $state(true);
 	let listingFiles = $state<File[]>([]);
 	let formCategory = $state('');
 	let formCategoryOther = $state('');
@@ -134,6 +135,7 @@
 	function openNewListing() { resetListingForm(); modal = 'listing'; error = ''; }
 
 	function openEditListing(listing: Listing) {
+		formForSale = listing.for_sale !== false;
 		editingListing = listing; formName = listing.name; formUrl = listing.product_url; formSummary = listing.summary; formDescription = listing.description || ''; formPrice = String(listing.asking_price ?? ''); formCosts = String(listing.operating_cost ?? ''); formAssets = listing.assets_included || ''; formMrrStatus = listing.mrr_status || 'unknown'; formPublish = true; formCategory = listing.category && categories.includes(listing.category) ? listing.category : listing.category ? 'Other' : ''; formCategoryOther = listing.category && !categories.includes(listing.category) ? listing.category : ''; formProblem = listing.problem_solved || ''; formAudience = listing.audience || ''; formPricing = listing.pricing_model || ''; formTotalRevenue = listing.total_revenue == null ? '' : String(listing.total_revenue); formLast30dRevenue = listing.last_30d_revenue == null ? '' : String(listing.last_30d_revenue); formActiveCustomers = listing.active_customers == null ? '' : String(listing.active_customers); formGrowth = listing.growth_percent == null ? '' : String(listing.growth_percent); formChurn = listing.churn_percent == null ? '' : String(listing.churn_percent); formGithubUrl = listing.github_url || ''; formGoogleAnalytics = listing.google_analytics_property || ''; formSearchConsole = listing.google_search_console_url || ''; connectGoogleAnalytics = !!formGoogleAnalytics; connectSearchConsole = !!formSearchConsole; connectGithub = !!formGithubUrl; formPublicMetrics = !!(listing as any).public_metrics; formTechOther = ''; selectedTech = [];
 		try { const parsed = JSON.parse(String(listing.tech_stack || '')); selectedTech = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string' && techOptions.includes(value)) : []; const other = Array.isArray(parsed) ? parsed.find((value) => typeof value === 'string' && !techOptions.includes(value)) : ''; formTechOther = other || ''; } catch { selectedTech = String(listing.tech_stack || '').split(',').map((value) => value.trim()).filter((value) => techOptions.includes(value)); }
 		modal = 'listing'; error = '';
@@ -220,9 +222,9 @@
 
 	async function submitListing() {
 		try {
-			const techStack = JSON.stringify([...selectedTech, ...(formTechOther.trim() ? [formTechOther.trim()] : [])]);
+		const techStack = JSON.stringify([...selectedTech, ...(formTechOther.trim() ? [formTechOther.trim()] : [])]);
 			const category = formCategory === 'Other' ? formCategoryOther.trim() : formCategory;
-			const payload = JSON.stringify({ productUrl: formUrl, name: formName, summary: formSummary, description: formDescription, askingPrice: formPrice, operatingCost: formCosts, assetsIncluded: formAssets, mrrStatus: formMrrStatus, publish: formPublish, category, problemSolved: formProblem, audience: formAudience, pricingModel: formPricing, techStack, totalRevenue: formTotalRevenue, last30dRevenue: formLast30dRevenue, activeCustomers: formActiveCustomers, growthPercent: formGrowth, churnPercent: formChurn, githubUrl: formGithubUrl, googleAnalyticsProperty: connectGoogleAnalytics ? formGoogleAnalytics : '', googleSearchConsoleUrl: connectSearchConsole ? formSearchConsole : '', publicMetrics: formPublicMetrics });
+			const payload = JSON.stringify({ productUrl: formUrl, name: formName, summary: formSummary, description: formDescription, askingPrice: formPrice, operatingCost: formCosts, assetsIncluded: formAssets, mrrStatus: formMrrStatus, publish: formPublish, forSale: formForSale, category, problemSolved: formProblem, audience: formAudience, pricingModel: formPricing, techStack, totalRevenue: formTotalRevenue, last30dRevenue: formLast30dRevenue, activeCustomers: formActiveCustomers, growthPercent: formGrowth, churnPercent: formChurn, githubUrl: formGithubUrl, googleAnalyticsProperty: connectGoogleAnalytics ? formGoogleAnalytics : '', googleSearchConsoleUrl: connectSearchConsole ? formSearchConsole : '', publicMetrics: formPublicMetrics });
 			const data = await api(editingListing ? `listings/${editingListing.id}` : 'listings', { method: editingListing ? 'PATCH' : 'POST', body: payload });
 			const listingId = Number(data.id || editingListing?.id || 0);
 			if (productIconFile && listingId) { const iconForm = new FormData(); iconForm.append('icon', productIconFile); await api(`listings/${listingId}/icon`, { method: 'POST', body: iconForm }); }
@@ -430,6 +432,7 @@
 				<div class="field stripe-key-row"><label for="stripe-key">Restricted Stripe key (optional)</label><div class="input-action"><input id="stripe-key" type="password" bind:value={stripeKey} placeholder="rk_test_..." /><a class="icon-button" href={stripeCreateUrl} target="_blank" rel="noreferrer" title="Open the prefilled Stripe restricted-key form in a new tab" aria-label="Open the prefilled Stripe restricted-key form in a new tab">↗</a></div><small class="field-help">Enter it once to save it securely. The same key can verify every product in this Stripe account; leave this blank on later listings to reuse it.</small></div>
 				<div class="media-upload-grid"><div class="field"><label for="product-icon">Product icon (optional, PNG/JPG, max 1MB)</label><input id="product-icon" type="file" accept="image/jpeg,image/png" onchange={chooseProductIcon} />{#if productIconFile}<small class="file-note">Icon selected: {productIconFile.name}</small>{/if}</div><div class="field"><label for="listing-images">Product images (optional, PNG/JPG, 0–5; max 2MB each)</label><input id="listing-images" type="file" multiple accept="image/jpeg,image/png" onchange={chooseListingImages} />{#if listingFiles.length}<small class="file-note">{listingFiles.length} image{listingFiles.length === 1 ? '' : 's'} selected</small>{/if}</div></div>
 				<div class="field check-row"><input id="publish" type="checkbox" bind:checked={formPublish} /><label for="publish">Publish immediately</label></div>
+				<div class="field check-row"><input id="for-sale" type="checkbox" bind:checked={formForSale} /><label for="for-sale">Available for sale</label></div>
 				{#if editingListing && connectGoogleAnalytics && formGoogleAnalytics}<a class="button ghost full" href={`/api/google/connect?listingId=${editingListing.id}&provider=analytics&property=${encodeURIComponent(formGoogleAnalytics)}`}>Connect Google Analytics</a>{/if}
 				{#if editingListing && connectSearchConsole && formSearchConsole}<a class="button ghost full" href={`/api/google/connect?listingId=${editingListing.id}&provider=search_console&property=${encodeURIComponent(formSearchConsole)}`}>Connect Search Console</a>{/if}
 				<button class="button coral full" onclick={submitListing}>{editingListing ? 'Save changes' : 'Save listing'}</button>

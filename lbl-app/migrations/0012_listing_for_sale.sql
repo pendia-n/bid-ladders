@@ -1,0 +1,1 @@
+ALTER TABLE listings ADD COLUMN for_sale INTEGER NOT NULL DEFAULT 1 CHECK (for_sale IN (0, 1));
