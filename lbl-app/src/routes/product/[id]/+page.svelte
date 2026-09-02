@@ -52,6 +52,19 @@
 			<div class="detail-actions"><button class="button ghost" onclick={shareListing} title="Share this product">{copied ? 'Copied' : 'Share'}</button><a class="button dark" href={listing.product_url} target="_blank" rel="noreferrer">Visit product ↗</a></div>
 		</header>
 
+		{#if listing.images?.length}
+			<section class="screenshot-section" aria-labelledby="product-screenshots-heading">
+				<div class="panel-heading"><div><p class="eyebrow">PRODUCT SCREENSHOTS</p><h2 id="product-screenshots-heading">See the product.</h2></div><span class="panel-note">{listing.images.length} image{listing.images.length === 1 ? '' : 's'}</span></div>
+				<div class="screenshot-gallery">
+					{#each listing.images as image, index}
+						<a href={image} target="_blank" rel="noreferrer" aria-label={`Open ${listing.name} screenshot ${index + 1} at full size`}>
+							<img src={image} alt={`${listing.name} product screenshot ${index + 1}`} loading="lazy" />
+						</a>
+					{/each}
+				</div>
+			</section>
+		{/if}
+
 		<section class="detail-metrics" aria-label="Verified product metrics">
 				<article class="detail-metric"><span>All-time revenue</span><strong>{money(listing.total_revenue)}</strong><small>{listing.total_revenue == null ? 'No readable Stripe revenue attached' : listing.mrr_status === 'verified' ? 'Attributed to the verified Stripe product family' : 'Seller-provided context'}</small></article>
 			<article class="detail-metric"><span>MRR</span><strong>{money(listing.mrr)}</strong><small>{listing.mrr_status === 'verified' ? 'Verified from seller-confirmed Stripe prices' : listing.mrr_status === 'zero' ? '$0 MRR stated by seller' : 'Not verified'}</small></article>
