@@ -705,6 +705,18 @@ async function handle(event: RequestEvent): Promise<Response> {
 		try { return json({ families: await matchingStripeProducts(key, String(input.name || '')) }); } catch (error: any) { return json({ error: error?.message || 'Stripe search failed' }, 400); }
 	}
 
+	if (route === 'stripe/connection' && method === 'GET') {
+		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError;
+		const connection = await getDb(event).prepare('SELECT encrypted_key FROM stripe_connections WHERE seller_id = ?').bind(user.id).first<{ encrypted_key: string }>();
+		if (!connection?.encrypted_key) return json({ connected: false, maskedKey: null });
+		try {
+			const secret = envFrom(event).ENCRYPTION_KEY || envFrom(event).JWT_SECRET || 'local-development-only-change-me';
+			const key = await decryptText(connection.encrypted_key, secret);
+			const maskedKey = key.length > 20 ? `${key.slice(0, 10)}...${key.slice(-10)}` : `${key.slice(0, 4)}...${key.slice(-4)}`;
+			return json({ connected: true, maskedKey });
+		} catch { return json({ connected: false, maskedKey: null }); }
+	}
+
 	if (segments[0] === 'listings' && segments[2] === 'verify' && method === 'POST') {
 		const user = await requireUser(event); const roleError = forbiddenRole(user, 'seller'); if (roleError) return roleError; const listingId = Number(segments[1]);
 		const listing = await getDb(event).prepare('SELECT id, name FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number; name: string }>();
