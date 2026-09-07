@@ -68,7 +68,7 @@
 		<section class="detail-metrics" aria-label="Verified product metrics">
 				<article class="detail-metric"><span>All-time revenue</span><strong>{money(listing.total_revenue)}</strong><small>{listing.total_revenue == null ? 'No readable Stripe revenue attached' : listing.mrr_status === 'verified' ? 'Attributed to the verified Stripe product family' : 'Seller-provided context'}</small></article>
 			<article class="detail-metric"><span>MRR</span><strong>{money(listing.mrr)}</strong><small>{listing.mrr_status === 'verified' ? 'Verified from seller-confirmed Stripe prices' : listing.mrr_status === 'zero' ? '$0 MRR stated by seller' : 'Not verified'}</small></article>
-			<article class="detail-metric"><span>Asking price</span><strong>{money(listing.asking_price)}</strong><small>Product-level listing, not an LLC sale</small></article>
+			<article class="detail-metric"><span>Asking price</span>{#if listing.for_sale}<strong>{money(listing.asking_price)}</strong><small>Product-level listing, not an LLC sale</small>{:else}<strong class="not-for-sale-value">Not for Sale</strong><small>Seller has paused acquisition inquiries. The asking price is retained privately for later relisting.</small>{/if}</article>
 			<article class="detail-metric"><span>Operating cost</span><strong>{money(listing.operating_cost)}</strong><small>Monthly figure supplied by seller</small></article>
 		</section>
 

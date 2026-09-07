@@ -373,7 +373,7 @@
 									{#if listing.product_icon_url || listing.images?.[0]}<img class="listing-thumb" src={listing.product_icon_url || listing.images?.[0]} alt="" />{/if}
 									<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={`/product/${listing.id}`}>{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div>
 									<p>{listing.summary}</p>
-									<div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div>
+									<div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span>{#if listing.for_sale}<span>Ask {money(listing.asking_price)}</span>{:else}<span class="not-for-sale">Not for Sale</span>{/if}<span>@{listing.seller_username}</span></div>
 								</div>
 								<div class="row-actions">
 									<a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>
@@ -392,7 +392,7 @@
 									{#if listing.product_icon_url || listing.images?.[0]}<img class="listing-thumb" src={listing.product_icon_url || listing.images?.[0]} alt="" />{/if}
 									<div class="listing-title"><img class="seller-avatar" src={listing.seller_profile_image_url || '/profile.svg'} alt="" /><a href={`/product/${listing.id}`}>{listing.name}</a>{#if listing.is_sponsored}<span class="sponsored-tag">SPONSORED · ${listing.paid_bid}</span>{/if}</div>
 									<p>{listing.summary}</p>
-									<div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span><span>Ask {money(listing.asking_price)}</span><span>@{listing.seller_username}</span></div>
+									<div class="listing-meta"><span class="mrr-tag {listing.mrr_status}">{listing.mrr_status === 'verified' ? 'VERIFIED MRR' : listing.mrr_status === 'zero' ? '$0 MRR' : 'MRR UNVERIFIED'} · {money(listing.mrr)}</span>{#if listing.for_sale}<span>Ask {money(listing.asking_price)}</span>{:else}<span class="not-for-sale">Not for Sale</span>{/if}<span>@{listing.seller_username}</span></div>
 								</div>
 								<div class="row-actions">
 									<a class="icon-button" href={`/product/${listing.id}`} title="Open listing details" aria-label="Open listing details">→</a>
