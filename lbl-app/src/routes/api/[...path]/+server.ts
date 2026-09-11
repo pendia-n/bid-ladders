@@ -1,6 +1,6 @@
 import type { RequestEvent } from '@sveltejs/kit';
 import { base64UrlDecode, base64UrlEncode, decryptText, encryptText, signHs256, verifyHs256, verifyTotp } from '$lib/server/crypto';
-import { envFrom, getDb, loginUser, registerUser, requireUser, userFromToken, verifyUserTotp, type AuthUser } from '$lib/server/auth';
+import { completeTotpLogin, envFrom, getDb, loginUser, registerUser, requireUser, userFromToken, verifyUserTotp, type AuthUser } from '$lib/server/auth';
 import { createEscrowTransaction, escrowWebLink, getEscrowTransaction, platformFeeForAmount } from '$lib/server/escrow';
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
@@ -482,6 +482,12 @@ async function handle(event: RequestEvent): Promise<Response> {
 		catch (error: any) { return json({ error: error?.message || 'Invalid username or password' }, 401); }
 	}
 
+	if (route === 'auth/login/totp' && method === 'POST') {
+		const input = await body(event);
+		try { return json(await completeTotpLogin(event, Number(input.userId), String(input.code || ''))); }
+		catch (error: any) { return json({ error: error?.message || 'Invalid TOTP code' }, 401); }
+	}
+
 	if (route === 'auth/me' && method === 'GET') {
 		const user = await userFromToken(event);
 		return user ? json({ user }) : json({ user: null }, 401);
@@ -502,10 +508,28 @@ async function handle(event: RequestEvent): Promise<Response> {
 		return json({ ok: true });
 	}
 
+	if (route === 'auth/totp/disable' && method === 'POST') {
+		const user = await requireUser(event); const input = await body(event);
+		if (!(await verifyUserTotp(event, user, String(input.code || '')))) return json({ error: 'Valid TOTP code required' }, 400);
+		await getDb(event).prepare('UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?').bind(user.id).run();
+		return json({ ok: true });
+	}
+
 	if (route === 'auth/password/reset' && method === 'POST') {
 		const user = await requireUser(event); const input = await body(event);
 		if (!user.totp_enabled) return json({ error: 'Password reset requires TOTP to be enabled' }, 400);
 		if (!(await verifyUserTotp(event, user, String(input.code || '')))) return json({ error: 'Valid TOTP code required' }, 400);
+		const password = String(input.password || '');
+		if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) return json({ error: 'Password must be 12+ characters with upper, lower, and number characters' }, 400);
+		const { hashPassword } = await import('$lib/server/crypto'); const data = await hashPassword(password);
+		await getDb(event).prepare('UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ? WHERE id = ?').bind(data.hash, data.salt, data.iterations, user.id).run();
+		return json({ ok: true });
+	}
+
+	if (route === 'auth/recovery' && method === 'POST') {
+		const input = await body(event); const username = String(input.username || '').trim().toLowerCase();
+		const user = await getDb(event).prepare('SELECT id, totp_secret, totp_enabled FROM users WHERE username = ?').bind(username).first<{ id: number; totp_secret: string | null; totp_enabled: number }>();
+		if (!user || !user.totp_enabled || !user.totp_secret || !(await verifyTotp(user.totp_secret, String(input.code || '')))) return json({ error: 'Username or TOTP code is incorrect' }, 400);
 		const password = String(input.password || '');
 		if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) return json({ error: 'Password must be 12+ characters with upper, lower, and number characters' }, 400);
 		const { hashPassword } = await import('$lib/server/crypto'); const data = await hashPassword(password);

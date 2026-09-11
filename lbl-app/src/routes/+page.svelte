@@ -37,6 +37,9 @@
 	let authRole = $state<Role>('buyer');
 	let authUsername = $state('');
 	let authPassword = $state('');
+	let authCode = $state('');
+	let authUserId = $state(0);
+	let authTotpRequired = $state(false);
 	let profileFile = $state<File | null>(null);
 	let productIconFile = $state<File | null>(null);
 	let formName = $state('');
@@ -209,15 +212,17 @@
 	async function submitAuth() {
 		error = '';
 		try {
-			const endpoint = authMode === 'signup' ? 'auth/signup' : 'auth/login';
-			const data = await api(endpoint, { method: 'POST', body: JSON.stringify({ username: authUsername, password: authPassword, role: authRole }) });
+			const endpoint = authTotpRequired ? 'auth/login/totp' : authMode === 'signup' ? 'auth/signup' : 'auth/login';
+			const payload = authTotpRequired ? { userId: authUserId, code: authCode } : { username: authUsername, password: authPassword, role: authRole };
+			const data = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
+			if (data.totpRequired) { authUserId = data.userId; authTotpRequired = true; authCode = ''; return; }
 			token = data.token; user = data.user; localStorage.setItem('lbl-token', token);
 			if (authMode === 'signup' && profileFile) {
 				const form = new FormData(); form.append('image', profileFile);
 				await api('media/profile', { method: 'POST', body: form });
 				user = (await api('auth/me')).user;
 			}
-			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; profileFile = null; notice = authMode === 'signup' ? 'Account created. Complete the short onboarding step before acting.' : 'Welcome back.'; await loadDeals();
+			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; profileFile = null; notice = authMode === 'signup' ? 'Account created. Open Security to enable an authenticator app.' : 'Welcome back.'; await loadDeals();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to authenticate'; }
 	}
 
@@ -321,6 +326,7 @@
 			{#if user}
 				<span class="user-chip"><img class="user-avatar" src={avatarUrl(user.profile_image_key)} alt="" />@{user.username} <small>{user.role}</small></span>
 				<a class="button ghost" href="/profile">Profile</a>
+				<a class="button ghost" href="/security">Security</a>
 				<button class="button ghost" onclick={signOut}>Sign out</button>
 			{:else}
 				<button class="button ghost" onclick={() => { authMode = 'login'; modal = 'auth'; }}>Sign in</button>
@@ -415,9 +421,11 @@
 		<div class="modal" role="dialog" aria-modal="true">
 			<button class="modal-close" aria-label="Close" onclick={() => modal = null}>×</button>
 			{#if modal === 'auth'}
-				<p class="eyebrow">{authMode === 'signup' ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h2>{authMode === 'signup' ? 'Join the board.' : 'Sign in.'}</h2><p class="modal-intro">One account can be a seller or a buyer. Use a strong password; optional TOTP protects sensitive account actions.</p>
+				<p class="eyebrow">{authTotpRequired ? 'AUTHENTICATOR CHECK' : authMode === 'signup' ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h2>{authTotpRequired ? 'Enter your 6-digit code.' : authMode === 'signup' ? 'Join the board.' : 'Sign in.'}</h2><p class="modal-intro">{authTotpRequired ? 'Confirm the code from your authenticator app to finish signing in.' : 'One account can be a seller or a buyer. Enable TOTP from Security after registration.'}</p>
+				{#if authTotpRequired}<div class="field"><label for="auth-totp">Authenticator code</label><input id="auth-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={authCode} placeholder="123456" /></div><button class="button dark full" onclick={submitAuth}>Verify code</button>{:else}
 				<div class="segmented"><button class:chosen={authMode === 'signup'} onclick={() => authMode = 'signup'}>Sign up</button><button class:chosen={authMode === 'login'} onclick={() => authMode = 'login'}>Sign in</button></div>
-				<div class="field"><label for="auth-username">Username</label><input id="auth-username" bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label for="auth-profile">Profile picture (optional, max 2MB)</label><input id="auth-profile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseProfile} /></div><div class="field"><span class="field-label">I am here to</span><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account' : 'Sign in'}</button>
+				<div class="field"><label for="auth-username">Username</label><input id="auth-username" bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label for="auth-profile">Profile picture (optional, max 2MB)</label><input id="auth-profile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseProfile} /></div><div class="field"><span class="field-label">I am here to</span><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account' : 'Sign in'}</button><a class="text-link" href="/recovery">Forgot password?</a>
+				{/if}
 			{:else if modal === 'buyer'}
 				<p class="eyebrow">BUYER ONBOARDING</p><h2>Make a credible first move.</h2><p class="modal-intro">Sellers see who is making an offer and what kind of buyer they are dealing with. No payment is taken at this step.</p><div class="form-grid"><div class="field"><label for="buyer-legal">Legal name</label><input id="buyer-legal" bind:value={buyerLegal} /></div><div class="field"><label for="buyer-company">Company name (optional)</label><input id="buyer-company" bind:value={buyerCompany} /></div><div class="field"><label for="buyer-title">Role / title</label><input id="buyer-title" bind:value={buyerTitle} /></div><div class="field"><label for="buyer-country">Country</label><input id="buyer-country" bind:value={buyerCountry} /></div><div class="field"><label for="buyer-timezone">Timezone</label><input id="buyer-timezone" bind:value={buyerTimezone} /></div><div class="field"><label for="buyer-budget">Budget range</label><input id="buyer-budget" bind:value={buyerBudget} placeholder="$5k–$25k" /></div></div><div class="field"><span class="field-label">Purchase as</span><div class="segmented"><button class:chosen={buyerEntity === 'personal'} onclick={() => buyerEntity = 'personal'}>Personally</button><button class:chosen={buyerEntity === 'company'} onclick={() => buyerEntity = 'company'}>A company</button></div></div><button class="button dark full" onclick={submitBuyer}>Save buyer profile</button>
 			{:else if modal === 'listing'}

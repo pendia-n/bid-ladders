@@ -95,6 +95,13 @@ export async function loginUser(event: RequestEvent, username: string, password:
 	const userRecord = await getDb(event).prepare('SELECT * FROM users WHERE username = ?').bind(username.trim().toLowerCase()).first<any>();
 	if (!userRecord || !(await verifyPassword(password, userRecord.password_hash, userRecord.password_salt, userRecord.password_iterations))) throw new Error('Invalid username or password');
 	const user: AuthUser = { id: userRecord.id, username: userRecord.username, role: userRecord.role, totp_enabled: userRecord.totp_enabled, profile_image_key: userRecord.profile_image_key, display_name: userRecord.display_name, bio: userRecord.bio, website: userRecord.website, country: userRecord.country, timezone: userRecord.timezone, contact_email: userRecord.contact_email };
+	if (user.totp_enabled) return { user, totpRequired: true, userId: user.id };
+	return { user, token: await createToken(event, user) };
+}
+
+export async function completeTotpLogin(event: RequestEvent, userId: number, code: string) {
+	const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key, display_name, bio, website, country, timezone, contact_email FROM users WHERE id = ?').bind(userId).first<AuthUser>();
+	if (!user || !user.totp_enabled || !(await verifyUserTotp(event, user, code))) throw new Error('Invalid TOTP code');
 	return { user, token: await createToken(event, user) };
 }
 
