@@ -222,7 +222,8 @@
 				await api('media/profile', { method: 'POST', body: form });
 				user = (await api('auth/me')).user;
 			}
-			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; profileFile = null; notice = authMode === 'signup' ? 'Account created. Open Security to enable an authenticator app.' : 'Welcome back.'; await loadDeals();
+			if (authMode === 'signup') { window.location.href = '/security'; return; }
+			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; profileFile = null; notice = 'Welcome back.'; await loadDeals();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to authenticate'; }
 	}
 
