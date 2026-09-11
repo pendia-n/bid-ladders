@@ -85,9 +85,9 @@ export async function registerUser(event: RequestEvent, username: string, passwo
 	if (!/^[a-z0-9_]{3,24}$/.test(normalized)) throw new Error('Username must be 3-24 characters using letters, numbers, or underscores');
 	if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) throw new Error('Password must be 12+ characters with upper, lower, and number characters');
 	const passwordData = await hashPassword(password);
-	const totpSecret = totpSecretInput.trim() || toBase32(crypto.getRandomValues(new Uint8Array(20)));
-	if (!(await verifyTotp(totpSecret, totpCode))) throw new Error('Scan the QR code and enter a valid authenticator code');
-	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role, totp_secret, totp_enabled) VALUES (?, ?, ?, ?, ?, ?, 1)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role, totpSecret).run();
+	const totpSecret = totpSecretInput.trim() || null;
+	if (totpSecret && !(await verifyTotp(totpSecret, totpCode))) throw new Error('Scan the QR code and enter a valid authenticator code');
+	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role, totp_secret, totp_enabled) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role, totpSecret, totpSecret ? 1 : 0).run();
 	const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key, display_name, bio, website, country, timezone, contact_email FROM users WHERE id = ?').bind(result.meta.last_row_id).first<AuthUser>();
 	if (!user) throw new Error('Unable to create account');
 	return { user, token: await createToken(event, user) };
