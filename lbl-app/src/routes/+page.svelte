@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import QRCode from 'qrcode';
 
 	type Role = 'seller' | 'buyer';
 	type User = { id: number; username: string; role: Role; totp_enabled: boolean; profile_image_key?: string | null; display_name?: string | null; bio?: string | null; website?: string | null; country?: string | null; timezone?: string | null };
@@ -40,6 +41,9 @@
 	let authCode = $state('');
 	let authUserId = $state(0);
 	let authTotpRequired = $state(false);
+	let registrationTotp = $state<{ secret: string; otpauth: string } | null>(null);
+	let registrationTotpCode = $state('');
+	let registrationTotpQr = $state('');
 	let profileFile = $state<File | null>(null);
 	let productIconFile = $state<File | null>(null);
 	let formName = $state('');
@@ -222,9 +226,15 @@
 				await api('media/profile', { method: 'POST', body: form });
 				user = (await api('auth/me')).user;
 			}
-			if (authMode === 'signup') { window.location.href = '/security'; return; }
+			if (authMode === 'signup' && data.totpSetup) { registrationTotp = data.totpSetup; registrationTotpQr = await QRCode.toDataURL(data.totpSetup.otpauth, { width: 220, margin: 2 }); token = data.token; user = data.user; localStorage.setItem('lbl-token', token); authPassword = ''; return; }
 			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; profileFile = null; notice = 'Welcome back.'; await loadDeals();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to authenticate'; }
+	}
+
+	async function confirmRegistrationTotp() {
+		error = '';
+		try { await api('auth/totp/enable', { method: 'POST', body: JSON.stringify({ code: registrationTotpCode }) }); if (user) user.totp_enabled = true; registrationTotp = null; registrationTotpQr = ''; registrationTotpCode = ''; modal = null; notice = 'Account created and TOTP enabled.'; }
+		catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid TOTP code'; }
 	}
 
 	function signOut() { token = ''; user = null; deals = []; messages = []; localStorage.removeItem('lbl-token'); view = 'market'; selectedDeal = null; }
@@ -423,7 +433,7 @@
 			<button class="modal-close" aria-label="Close" onclick={() => modal = null}>×</button>
 			{#if modal === 'auth'}
 				<p class="eyebrow">{authTotpRequired ? 'AUTHENTICATOR CHECK' : authMode === 'signup' ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h2>{authTotpRequired ? 'Enter your 6-digit code.' : authMode === 'signup' ? 'Join the board.' : 'Sign in.'}</h2><p class="modal-intro">{authTotpRequired ? 'Confirm the code from your authenticator app to finish signing in.' : 'One account can be a seller or a buyer. Enable TOTP from Security after registration.'}</p>
-				{#if authTotpRequired}<div class="field"><label for="auth-totp">Authenticator code</label><input id="auth-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={authCode} placeholder="123456" /></div><button class="button dark full" onclick={submitAuth}>Verify code</button>{:else}
+				{#if registrationTotp}<p class="modal-intro">Scan this QR code with your authenticator app.</p><div class="totp-register"><img class="totp-qr" src={registrationTotpQr} alt="Scan this QR code with your authenticator app" /><p>Manual key: <code>{registrationTotp.secret}</code></p></div><div class="field"><label for="registration-totp">Authenticator code</label><input id="registration-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={registrationTotpCode} placeholder="123456" /></div><button class="button dark full" onclick={confirmRegistrationTotp}>Verify and finish registration</button>{:else if authTotpRequired}<div class="field"><label for="auth-totp">Authenticator code</label><input id="auth-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={authCode} placeholder="123456" /></div><button class="button dark full" onclick={submitAuth}>Verify code</button>{:else}
 				<div class="segmented"><button class:chosen={authMode === 'signup'} onclick={() => authMode = 'signup'}>Sign up</button><button class:chosen={authMode === 'login'} onclick={() => authMode = 'login'}>Sign in</button></div>
 				<div class="field"><label for="auth-username">Username</label><input id="auth-username" bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label for="auth-profile">Profile picture (optional, max 2MB)</label><input id="auth-profile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseProfile} /></div><div class="field"><span class="field-label">I am here to</span><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account' : 'Sign in'}</button><a class="text-link" href="/recovery">Forgot password?</a>
 				{/if}
