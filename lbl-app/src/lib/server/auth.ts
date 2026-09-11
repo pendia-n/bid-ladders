@@ -80,15 +80,16 @@ export async function requireUser(event: RequestEvent): Promise<AuthUser> {
 	return user;
 }
 
-export async function registerUser(event: RequestEvent, username: string, password: string, role: Role) {
+export async function registerUser(event: RequestEvent, username: string, password: string, role: Role, setupTotp = false) {
 	const normalized = username.trim().toLowerCase();
 	if (!/^[a-z0-9_]{3,24}$/.test(normalized)) throw new Error('Username must be 3-24 characters using letters, numbers, or underscores');
 	if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) throw new Error('Password must be 12+ characters with upper, lower, and number characters');
 	const passwordData = await hashPassword(password);
-	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role) VALUES (?, ?, ?, ?, ?)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role).run();
+	const totpSecret = setupTotp ? (await import('./crypto')).toBase32(crypto.getRandomValues(new Uint8Array(20))) : null;
+	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role, totp_secret) VALUES (?, ?, ?, ?, ?, ?)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role, totpSecret).run();
 	const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key, display_name, bio, website, country, timezone, contact_email FROM users WHERE id = ?').bind(result.meta.last_row_id).first<AuthUser>();
 	if (!user) throw new Error('Unable to create account');
-	return { user, token: await createToken(event, user) };
+	return { user, token: await createToken(event, user), totpSetup: totpSecret ? { secret: totpSecret, otpauth: `otpauth://totp/BidLadders:${encodeURIComponent(user.username)}?secret=${totpSecret}&issuer=BidLadders` } : null };
 }
 
 export async function loginUser(event: RequestEvent, username: string, password: string) {

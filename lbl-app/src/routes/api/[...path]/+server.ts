@@ -472,7 +472,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 	if (route === 'auth/signup' && method === 'POST') {
 		const input = await body(event);
 		if (!['seller', 'buyer'].includes(input.role)) return json({ error: 'Choose seller or buyer' }, 400);
-		try { return json(await registerUser(event, String(input.username || ''), String(input.password || ''), input.role)); }
+		try { return json(await registerUser(event, String(input.username || ''), String(input.password || ''), input.role, true)); }
 		catch (error: any) { return json({ error: String(error?.message || '').includes('UNIQUE') ? 'Username is already taken' : error?.message || 'Unable to create account' }, String(error?.message || '').includes('UNIQUE') ? 409 : 400); }
 	}
 
