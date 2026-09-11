@@ -2,7 +2,7 @@ import type { RequestEvent } from '@sveltejs/kit';
 import type { D1Database } from '@cloudflare/workers-types';
 import type { R2Bucket } from '@cloudflare/workers-types';
 import type { DurableObjectNamespace } from '@cloudflare/workers-types';
-import { base64UrlDecode, base64UrlEncode, hashPassword, signHs256, verifyHs256, verifyPassword, verifyTotp } from './crypto';
+import { base64UrlDecode, base64UrlEncode, hashPassword, signHs256, toBase32, verifyHs256, verifyPassword, verifyTotp } from './crypto';
 
 export type Role = 'seller' | 'buyer';
 
@@ -80,16 +80,17 @@ export async function requireUser(event: RequestEvent): Promise<AuthUser> {
 	return user;
 }
 
-export async function registerUser(event: RequestEvent, username: string, password: string, role: Role, setupTotp = false) {
+export async function registerUser(event: RequestEvent, username: string, password: string, role: Role, totpSecretInput = '', totpCode = '') {
 	const normalized = username.trim().toLowerCase();
 	if (!/^[a-z0-9_]{3,24}$/.test(normalized)) throw new Error('Username must be 3-24 characters using letters, numbers, or underscores');
 	if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) throw new Error('Password must be 12+ characters with upper, lower, and number characters');
 	const passwordData = await hashPassword(password);
-	const totpSecret = setupTotp ? (await import('./crypto')).toBase32(crypto.getRandomValues(new Uint8Array(20))) : null;
-	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role, totp_secret) VALUES (?, ?, ?, ?, ?, ?)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role, totpSecret).run();
+	const totpSecret = totpSecretInput.trim() || toBase32(crypto.getRandomValues(new Uint8Array(20)));
+	if (!(await verifyTotp(totpSecret, totpCode))) throw new Error('Scan the QR code and enter a valid authenticator code');
+	const result = await getDb(event).prepare('INSERT INTO users (username, password_hash, password_salt, password_iterations, role, totp_secret, totp_enabled) VALUES (?, ?, ?, ?, ?, ?, 1)').bind(normalized, passwordData.hash, passwordData.salt, passwordData.iterations, role, totpSecret).run();
 	const user = await getDb(event).prepare('SELECT id, username, role, totp_enabled, profile_image_key, display_name, bio, website, country, timezone, contact_email FROM users WHERE id = ?').bind(result.meta.last_row_id).first<AuthUser>();
 	if (!user) throw new Error('Unable to create account');
-	return { user, token: await createToken(event, user), totpSetup: totpSecret ? { secret: totpSecret, otpauth: `otpauth://totp/BidLadders:${encodeURIComponent(user.username)}?secret=${totpSecret}&issuer=BidLadders` } : null };
+	return { user, token: await createToken(event, user) };
 }
 
 export async function loginUser(event: RequestEvent, username: string, password: string) {

@@ -136,6 +136,18 @@
 
 	function toggleTech(value: string) { selectedTech = selectedTech.includes(value) ? selectedTech.filter((item) => item !== value) : [...selectedTech, value]; }
 
+	function registrationSecret() {
+		const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; const bytes = crypto.getRandomValues(new Uint8Array(20)); let output = ''; let buffer = 0; let bits = 0;
+		for (const byte of bytes) { buffer = (buffer << 8) | byte; bits += 8; while (bits >= 5) { bits -= 5; output += alphabet[(buffer >> bits) & 31]; } }
+		if (bits > 0) output += alphabet[(buffer << (5 - bits)) & 31]; return output;
+	}
+
+	async function openAuth(mode: 'login' | 'signup') {
+		authMode = mode; authTotpRequired = false; error = '';
+		if (mode === 'signup' && !registrationTotp) { const secret = registrationSecret(); const otpauth = `otpauth://totp/BidLadders:new-account?secret=${secret}&issuer=BidLadders`; registrationTotp = { secret, otpauth }; registrationTotpQr = await QRCode.toDataURL(otpauth, { width: 220, margin: 2 }); }
+		modal = 'auth';
+	}
+
 	function resetListingForm() {
 		editingListing = null; formName = ''; formUrl = ''; formSummary = ''; formDescription = ''; formPrice = ''; formCosts = ''; formAssets = ''; formMrrStatus = 'unknown'; formPublish = true; listingFiles = []; productIconFile = null; formCategory = ''; formCategoryOther = ''; formProblem = ''; formAudience = ''; formPricing = ''; selectedTech = []; formTechOther = ''; formTotalRevenue = ''; formLast30dRevenue = ''; formActiveCustomers = ''; formGrowth = ''; formChurn = ''; formGithubUrl = ''; formGoogleAnalytics = ''; formSearchConsole = ''; connectGoogleAnalytics = false; connectSearchConsole = false; connectGithub = false; formPublicMetrics = false; stripeKey = ''; stripeKeyStatus = '';
 	}
@@ -217,7 +229,7 @@
 		error = '';
 		try {
 			const endpoint = authTotpRequired ? 'auth/login/totp' : authMode === 'signup' ? 'auth/signup' : 'auth/login';
-			const payload = authTotpRequired ? { userId: authUserId, code: authCode } : { username: authUsername, password: authPassword, role: authRole };
+			const payload = authTotpRequired ? { userId: authUserId, code: authCode } : { username: authUsername, password: authPassword, role: authRole, totpSecret: authMode === 'signup' ? registrationTotp?.secret : '', totpCode: authMode === 'signup' ? registrationTotpCode : '' };
 			const data = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
 			if (data.totpRequired) { authUserId = data.userId; authTotpRequired = true; authCode = ''; return; }
 			token = data.token; user = data.user; localStorage.setItem('lbl-token', token);
@@ -226,16 +238,10 @@
 				await api('media/profile', { method: 'POST', body: form });
 				user = (await api('auth/me')).user;
 			}
-			if (authMode === 'signup' && data.totpSetup) { registrationTotp = data.totpSetup; registrationTotpQr = await QRCode.toDataURL(data.totpSetup.otpauth, { width: 220, margin: 2 }); token = data.token; user = data.user; localStorage.setItem('lbl-token', token); authPassword = ''; return; }
 			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; profileFile = null; notice = 'Welcome back.'; await loadDeals();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to authenticate'; }
 	}
 
-	async function confirmRegistrationTotp() {
-		error = '';
-		try { await api('auth/totp/enable', { method: 'POST', body: JSON.stringify({ code: registrationTotpCode }) }); if (user) user.totp_enabled = true; registrationTotp = null; registrationTotpQr = ''; registrationTotpCode = ''; modal = null; notice = 'Account created and TOTP enabled.'; }
-		catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid TOTP code'; }
-	}
 
 	function signOut() { token = ''; user = null; deals = []; messages = []; localStorage.removeItem('lbl-token'); view = 'market'; selectedDeal = null; }
 
@@ -341,7 +347,7 @@
 				<button class="button ghost" onclick={signOut}>Sign out</button>
 			{:else}
 				<button class="button ghost" onclick={() => { authMode = 'login'; modal = 'auth'; }}>Sign in</button>
-				<button class="button dark" onclick={() => { authMode = 'signup'; modal = 'auth'; }}>Join</button>
+				<button class="button dark" onclick={() => openAuth('signup')}>Join</button>
 			{/if}
 		</div>
 	</header>
@@ -432,10 +438,10 @@
 		<div class="modal" role="dialog" aria-modal="true">
 			<button class="modal-close" aria-label="Close" onclick={() => modal = null}>×</button>
 			{#if modal === 'auth'}
-				<p class="eyebrow">{authTotpRequired ? 'AUTHENTICATOR CHECK' : authMode === 'signup' ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h2>{authTotpRequired ? 'Enter your 6-digit code.' : authMode === 'signup' ? 'Join the board.' : 'Sign in.'}</h2><p class="modal-intro">{authTotpRequired ? 'Confirm the code from your authenticator app to finish signing in.' : 'One account can be a seller or a buyer. Enable TOTP from Security after registration.'}</p>
-				{#if registrationTotp}<p class="modal-intro">Scan this QR code with your authenticator app.</p><div class="totp-register"><img class="totp-qr" src={registrationTotpQr} alt="Scan this QR code with your authenticator app" /><p>Manual key: <code>{registrationTotp.secret}</code></p></div><div class="field"><label for="registration-totp">Authenticator code</label><input id="registration-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={registrationTotpCode} placeholder="123456" /></div><button class="button dark full" onclick={confirmRegistrationTotp}>Verify and finish registration</button>{:else if authTotpRequired}<div class="field"><label for="auth-totp">Authenticator code</label><input id="auth-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={authCode} placeholder="123456" /></div><button class="button dark full" onclick={submitAuth}>Verify code</button>{:else}
-				<div class="segmented"><button class:chosen={authMode === 'signup'} onclick={() => authMode = 'signup'}>Sign up</button><button class:chosen={authMode === 'login'} onclick={() => authMode = 'login'}>Sign in</button></div>
-				<div class="field"><label for="auth-username">Username</label><input id="auth-username" bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label for="auth-profile">Profile picture (optional, max 2MB)</label><input id="auth-profile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseProfile} /></div><div class="field"><span class="field-label">I am here to</span><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account' : 'Sign in'}</button><a class="text-link" href="/recovery">Forgot password?</a>
+				<p class="eyebrow">{authTotpRequired ? 'AUTHENTICATOR CHECK' : authMode === 'signup' ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h2>{authTotpRequired ? 'Enter your 6-digit code.' : authMode === 'signup' ? 'Join the board.' : 'Sign in.'}</h2><p class="modal-intro">{authTotpRequired ? 'Confirm the code from your authenticator app to finish signing in.' : authMode === 'signup' ? 'Set up your authenticator app below. TOTP verification is required to create the account.' : 'One account can be a seller or a buyer.'}</p>
+				{#if authTotpRequired}<div class="field"><label for="auth-totp">Authenticator code</label><input id="auth-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={authCode} placeholder="123456" /></div><button class="button dark full" onclick={submitAuth}>Verify code</button>{:else}
+				<div class="segmented"><button class:chosen={authMode === 'signup'} onclick={() => openAuth('signup')}>Sign up</button><button class:chosen={authMode === 'login'} onclick={() => openAuth('login')}>Sign in</button></div>
+				<div class="field"><label for="auth-username">Username</label><input id="auth-username" bind:value={authUsername} placeholder="lowercase, 3–24 characters" /></div><div class="field"><label for="auth-password">Password</label><input id="auth-password" type="password" bind:value={authPassword} placeholder="12+ chars, upper/lower/number" /></div>{#if authMode === 'signup'}<div class="field"><label for="auth-profile">Profile picture (optional, max 2MB)</label><input id="auth-profile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseProfile} /></div><div class="field"><span class="field-label">I am here to</span><div class="segmented"><button class:chosen={authRole === 'buyer'} onclick={() => authRole = 'buyer'}>Buy a product</button><button class:chosen={authRole === 'seller'} onclick={() => authRole = 'seller'}>Sell a product</button></div></div><div class="totp-register"><strong>Authenticator setup required</strong><p>Scan this QR code before creating your account.</p>{#if registrationTotpQr}<img class="totp-qr" src={registrationTotpQr} alt="Scan this QR code with your authenticator app" /><p>Manual key: <code>{registrationTotp?.secret}</code></p>{/if}<div class="field"><label for="registration-totp">Authenticator code</label><input id="registration-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={registrationTotpCode} placeholder="123456" /></div></div>{/if}<button class="button dark full" onclick={submitAuth}>{authMode === 'signup' ? 'Create account with TOTP' : 'Sign in'}</button><a class="text-link" href="/recovery">Forgot password?</a>
 				{/if}
 			{:else if modal === 'buyer'}
 				<p class="eyebrow">BUYER ONBOARDING</p><h2>Make a credible first move.</h2><p class="modal-intro">Sellers see who is making an offer and what kind of buyer they are dealing with. No payment is taken at this step.</p><div class="form-grid"><div class="field"><label for="buyer-legal">Legal name</label><input id="buyer-legal" bind:value={buyerLegal} /></div><div class="field"><label for="buyer-company">Company name (optional)</label><input id="buyer-company" bind:value={buyerCompany} /></div><div class="field"><label for="buyer-title">Role / title</label><input id="buyer-title" bind:value={buyerTitle} /></div><div class="field"><label for="buyer-country">Country</label><input id="buyer-country" bind:value={buyerCountry} /></div><div class="field"><label for="buyer-timezone">Timezone</label><input id="buyer-timezone" bind:value={buyerTimezone} /></div><div class="field"><label for="buyer-budget">Budget range</label><input id="buyer-budget" bind:value={buyerBudget} placeholder="$5k–$25k" /></div></div><div class="field"><span class="field-label">Purchase as</span><div class="segmented"><button class:chosen={buyerEntity === 'personal'} onclick={() => buyerEntity = 'personal'}>Personally</button><button class:chosen={buyerEntity === 'company'} onclick={() => buyerEntity = 'company'}>A company</button></div></div><button class="button dark full" onclick={submitBuyer}>Save buyer profile</button>
