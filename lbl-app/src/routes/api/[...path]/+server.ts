@@ -517,8 +517,6 @@ async function handle(event: RequestEvent): Promise<Response> {
 
 	if (route === 'auth/password/reset' && method === 'POST') {
 		const user = await requireUser(event); const input = await body(event);
-		if (!user.totp_enabled) return json({ error: 'Password reset requires TOTP to be enabled' }, 400);
-		if (!(await verifyUserTotp(event, user, String(input.code || '')))) return json({ error: 'Valid TOTP code required' }, 400);
 		const password = String(input.password || '');
 		if (password.length < 12 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) return json({ error: 'Password must be 12+ characters with upper, lower, and number characters' }, 400);
 		const { hashPassword } = await import('$lib/server/crypto'); const data = await hashPassword(password);
