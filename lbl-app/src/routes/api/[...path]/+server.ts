@@ -231,7 +231,7 @@ function githubRepoPath(value: string) {
 }
 
 async function githubGet(path: string) {
-	const response = await fetch(`https://api.github.com/${path}`, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'BidLadders/1.0' } });
+	const response = await fetch(`https://api.github.com/${path}`, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'HitLam/1.0' } });
 	if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
 	return response.json() as Promise<any>;
 }
@@ -497,7 +497,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const user = await requireUser(event);
 		const secret = (await import('$lib/server/crypto')).toBase32(crypto.getRandomValues(new Uint8Array(20)));
 		await getDb(event).prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').bind(secret, user.id).run();
-		return json({ secret, otpauth: `otpauth://totp/BidLadders:${encodeURIComponent(user.username)}?secret=${secret}&issuer=BidLadders` });
+		return json({ secret, otpauth: `otpauth://totp/HitLam:${encodeURIComponent(user.username)}?secret=${secret}&issuer=HitLam` });
 	}
 
 	if (route === 'auth/totp/enable' && method === 'POST') {
@@ -565,7 +565,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 			reservation = (await carouselRequest(event, slotId, '/reserve', { listingId, sellerId: user.id })).slot;
 			const reservedUntil = new Date(reservation.reservedUntil).toISOString();
 			const result = await getDb(event).prepare('INSERT INTO carousel_orders (slot_id, listing_id, seller_id, reservation_id, reserved_until) VALUES (?, ?, ?, ?, ?)').bind(slotId, listingId, user.id, reservation.reservationId, reservedUntil).run();
-				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `BidLadders 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
+				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
 			await getDb(event).prepare('UPDATE carousel_orders SET checkout_session_id = ? WHERE id = ?').bind(session.id, result.meta.last_row_id).run();
 			return json({ url: session.url, sessionId: session.id, reservedUntil });
 		} catch (error: any) {
@@ -779,7 +779,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 			try { await getDb(event).prepare('INSERT INTO rank_reservations (desired_rank, bid_id, reserved_until) VALUES (?, ?, ?)').bind(desiredRank, bidId, expires).run(); }
 			catch { await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run(); return json({ error: 'Another checkout is already holding that rank. Choose another position or wait for it to expire.' }, 409); }
 			try {
-				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `BidLadders rank boost: ${listing.name}`, 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=cancelled`, 'metadata[type]': 'rank_bid', 'metadata[bid_id]': String(bidId), 'metadata[listing_id]': String(listingId), 'metadata[desired_rank]': String(desiredRank) }));
+				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam rank boost: ${listing.name}`, 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=cancelled`, 'metadata[type]': 'rank_bid', 'metadata[bid_id]': String(bidId), 'metadata[listing_id]': String(listingId), 'metadata[desired_rank]': String(desiredRank) }));
 				await getDb(event).prepare('UPDATE bids SET checkout_session_id = ? WHERE id = ?').bind(session.id, bidId).run(); return json({ url: session.url, sessionId: session.id });
 			} catch (error) { await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run(); await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run(); throw error; }
 	}

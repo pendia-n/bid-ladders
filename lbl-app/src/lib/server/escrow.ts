@@ -59,7 +59,7 @@ export async function createEscrowTransaction(event: RequestEvent, input: Escrow
 		]
 	}];
 	if (platformFee > 0) items.push({
-		title: 'BidLadders marketplace fee',
+		title: 'HitLam marketplace fee',
 		description: 'Marketplace fee for facilitating this product acquisition.',
 		type: 'partner_fee',
 		schedule: [{ amount: platformFee / 100, payer_customer: input.buyerEmail, beneficiary_customer: 'me' }]
@@ -69,7 +69,7 @@ export async function createEscrowTransaction(event: RequestEvent, input: Escrow
 		body: JSON.stringify({
 			parties: [{ role: 'buyer', customer: input.buyerEmail }, { role: 'seller', customer: input.sellerEmail }],
 			currency: 'usd',
-			description: `BidLadders acquisition: ${input.title}`.slice(0, 256),
+			description: `HitLam acquisition: ${input.title}`.slice(0, 256),
 			items
 		})
 	});

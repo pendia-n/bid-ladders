@@ -50,11 +50,11 @@
 	}
 </script>
 
-<svelte:head><title>Edit profile | BidLadders</title></svelte:head>
+<svelte:head><title>Edit profile | HitLam</title></svelte:head>
 
 <div class="profile-shell">
-	<nav class="detail-nav"><a class="brand" href="/"><img class="brand-logo" src="/bid.svg" alt="" /><span>BidLadders</span></a><a class="back-link" href="/">← Board</a></nav>
-	{#if loading}<div class="empty-state"><strong>Loading profile...</strong></div>{:else if !token}<div class="empty-state profile-empty"><strong>Sign in to edit your profile.</strong><a class="button dark" href="/">Return to BidLadders</a></div>{:else if profile}
+	<nav class="detail-nav"><a class="brand" href="/"><img class="brand-logo" src="/bid.svg" alt="" /><span>HitLam</span></a><a class="back-link" href="/">← Board</a></nav>
+	{#if loading}<div class="empty-state"><strong>Loading profile...</strong></div>{:else if !token}<div class="empty-state profile-empty"><strong>Sign in to edit your profile.</strong><a class="button dark" href="/">Return to HitLam</a></div>{:else if profile}
 		<main class="profile-main"><header class="profile-heading"><div><p class="eyebrow">ACCOUNT PROFILE</p><h1>Edit your profile.</h1><p>Keep the person behind the product or purchase inquiry current.</p></div><span class="profile-role">{profile.role}</span></header>
 			<section class="profile-card"><div class="profile-avatar-large"><img src={avatarUrl(profile.profile_image_key)} alt="" /></div><div class="profile-identity"><strong>@{profile.username}</strong><small>Username and role cannot be changed here.</small><label class="button ghost upload-button" for="profile-image">Change profile image</label><input id="profile-image" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={(event) => imageFile = (event.currentTarget as HTMLInputElement).files?.[0] || null} /></div></section>
 			<div class="profile-form"><div class="field"><label for="display-name">Display name</label><input id="display-name" bind:value={displayName} placeholder="Your name or public identity" /></div><div class="field"><label for="contact-email">Escrow contact email</label><input id="contact-email" type="email" bind:value={contactEmail} placeholder="Used only when starting escrow" /></div><div class="field"><label for="website">Website</label><input id="website" bind:value={website} placeholder="https://" /></div><div class="form-grid"><div class="field"><label for="country">Country</label><input id="country" bind:value={country} /></div><div class="field"><label for="timezone">Timezone</label><input id="timezone" bind:value={timezone} /></div></div><div class="field"><label for="bio">Bio</label><textarea id="bio" bind:value={bio} rows="6" placeholder="A short description of you and what you build or buy."></textarea></div>

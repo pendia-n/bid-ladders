@@ -17,7 +17,7 @@
 	type Message = { id: number; body: string; username: string; created_at: string; media?: { url: string; mime_type: string; byte_size: number }[] };
 	type CarouselSlot = { id: number; status: 'available' | 'reserved' | 'paid'; listing?: { listing_id: number; name: string; product_url: string; summary: string; image_url?: string } | null; expiresAt?: number };
 	type StripeFamily = { id: string; name: string; productIds: string[]; productNames: string[]; prices: { id: string; active?: boolean; unit_amount: number; currency: string; recurring?: { interval: string; interval_count: number } }[] };
-	const stripeCreateUrl = 'https://dashboard.stripe.com/apikeys/create?name=BidLadders&permissions%5B%5D=rak_charge_read&permissions%5B%5D=rak_subscription_read&permissions%5B%5D=rak_plan_read&permissions%5B%5D=rak_bucket_connect_read&permissions%5B%5D=rak_file_read&permissions%5B%5D=rak_product_read';
+	const stripeCreateUrl = 'https://dashboard.stripe.com/apikeys/create?name=HitLam&permissions%5B%5D=rak_charge_read&permissions%5B%5D=rak_subscription_read&permissions%5B%5D=rak_plan_read&permissions%5B%5D=rak_bucket_connect_read&permissions%5B%5D=rak_file_read&permissions%5B%5D=rak_product_read';
 	const categories = ['AI', 'Developer Tools', 'Productivity', 'Marketing', 'Media', 'E-commerce', 'Education', 'Finance', 'Health', 'Social', 'Consumer', 'Other'];
 	const pricingModels = ['Subscription', 'One-time', 'Usage-based', 'Freemium', 'Advertising', 'Marketplace', 'Other'];
 	const techOptions = ['HTML', 'CSS', 'JavaScript', 'TypeScript', 'Svelte', 'React', 'Vue', 'Node.js', 'Ruby', 'Python', 'Go', 'SQL', 'PostgreSQL', 'SQLite', 'MongoDB', 'Prisma', 'Cloudflare', 'AWS', 'Stripe'];
@@ -149,7 +149,7 @@
 		modal = 'auth';
 	}
 
-	async function toggleRegistrationTotp() { registrationTotpEnabled = !registrationTotpEnabled; if (registrationTotpEnabled && !registrationTotp) { const secret = registrationSecret(); const otpauth = `otpauth://totp/BidLadders:new-account?secret=${secret}&issuer=BidLadders`; registrationTotp = { secret, otpauth }; registrationTotpQr = await QRCode.toDataURL(otpauth, { width: 220, margin: 2 }); } }
+	async function toggleRegistrationTotp() { registrationTotpEnabled = !registrationTotpEnabled; if (registrationTotpEnabled && !registrationTotp) { const secret = registrationSecret(); const otpauth = `otpauth://totp/HitLam:new-account?secret=${secret}&issuer=HitLam`; registrationTotp = { secret, otpauth }; registrationTotpQr = await QRCode.toDataURL(otpauth, { width: 220, margin: 2 }); } }
 
 	function resetListingForm() {
 		editingListing = null; formName = ''; formUrl = ''; formSummary = ''; formDescription = ''; formPrice = ''; formCosts = ''; formAssets = ''; formMrrStatus = 'unknown'; formPublish = true; listingFiles = []; productIconFile = null; formCategory = ''; formCategoryOther = ''; formProblem = ''; formAudience = ''; formPricing = ''; selectedTech = []; formTechOther = ''; formTotalRevenue = ''; formLast30dRevenue = ''; formActiveCustomers = ''; formGrowth = ''; formChurn = ''; formGithubUrl = ''; formGoogleAnalytics = ''; formSearchConsole = ''; connectGoogleAnalytics = false; connectSearchConsole = false; connectGithub = false; formPublicMetrics = false; stripeKey = ''; stripeKeyStatus = '';
@@ -332,11 +332,11 @@
 	onMount(async () => { await restoreSession(); await Promise.all([loadListings(), loadCarousel()]); await handleIntent(); });
 </script>
 
-<svelte:head><title>BidLadders | Product-level acquisition board</title></svelte:head>
+<svelte:head><title>HitLam - A Praising On Your Stamina</title></svelte:head>
 
 <div class="app-shell">
 	<header class="topbar">
-		<a class="brand" href="/" aria-label="BidLadders home"><img class="brand-logo" src="/bid.svg" alt="" /><span>BidLadders</span></a>
+		<a class="brand" href="/" aria-label="HitLam home"><img class="brand-logo" src="/bid.svg" alt="" /><span>HitLam</span></a>
 		<nav class="nav" aria-label="Primary navigation">
 			<button class:active={view === 'market'} onclick={() => { view = 'market'; loadListings(); }}>Market</button>
 			<button class:active={view === 'mrr'} onclick={() => { view = 'mrr'; loadListings(); }}>All MRR</button>
@@ -433,7 +433,7 @@
 		{/if}
 	</main>
 
-	<footer><span>BidLadders · one product per listing</span><span>MRR is a signal, not a promise.</span></footer>
+	<footer><span>HitLam · one product per listing</span><span>MRR is a signal, not a promise.</span></footer>
 </div>
 
 {#if modal}
@@ -472,11 +472,11 @@
 				{#if editingListing && connectSearchConsole && formSearchConsole}<a class="button ghost full" href={`/api/google/connect?listingId=${editingListing.id}&provider=search_console&property=${encodeURIComponent(formSearchConsole)}`}>Connect Search Console</a>{/if}
 				<button class="button coral full" onclick={submitListing}>{editingListing ? 'Save changes' : 'Save listing'}</button>
 			{:else if modal === 'stripe'}
-				<p class="eyebrow">PRODUCT-FAMILY MRR VERIFICATION</p><h2>Verify the whole product family.</h2><p class="modal-intro">Search using the listing name. BidLadders groups every matching Stripe Product and automatically monitors every Price under them, including one-time and recurring Prices. There is no individual Product or Price selection.</p><div class="field"><label for="stripe-key-modal">Restricted read-only key (optional after first use)</label><input id="stripe-key-modal" type="password" bind:value={stripeKey} placeholder="rk_test_... or leave blank to reuse" /></div><button class="button dark full" onclick={searchStripe}>Find all matching Stripe Products</button>{#if selectedFamily}<div class="price-list stripe-family"><p class="eyebrow">{selectedFamily.name}</p><strong>{selectedFamily.productIds.length} Stripe Products · all {selectedFamily.prices.length} Prices will be monitored</strong><small>{selectedFamily.productNames.join(' · ')}</small><small>Recurring subscriptions and one-time revenue are included where Stripe exposes product attribution.</small></div><button class="button mint full" onclick={verifyStripe}>Verify this entire product family</button>{:else if stripeSearched}<p class="field-help">No matching Stripe Product family was found for &quot;{formName}&quot;. Check the listing name and Stripe Product names or descriptions.</p>{/if}
+				<p class="eyebrow">PRODUCT-FAMILY MRR VERIFICATION</p><h2>Verify the whole product family.</h2><p class="modal-intro">Search using the listing name. HitLam groups every matching Stripe Product and automatically monitors every Price under them, including one-time and recurring Prices. There is no individual Product or Price selection.</p><div class="field"><label for="stripe-key-modal">Restricted read-only key (optional after first use)</label><input id="stripe-key-modal" type="password" bind:value={stripeKey} placeholder="rk_test_... or leave blank to reuse" /></div><button class="button dark full" onclick={searchStripe}>Find all matching Stripe Products</button>{#if selectedFamily}<div class="price-list stripe-family"><p class="eyebrow">{selectedFamily.name}</p><strong>{selectedFamily.productIds.length} Stripe Products · all {selectedFamily.prices.length} Prices will be monitored</strong><small>{selectedFamily.productNames.join(' · ')}</small><small>Recurring subscriptions and one-time revenue are included where Stripe exposes product attribution.</small></div><button class="button mint full" onclick={verifyStripe}>Verify this entire product family</button>{:else if stripeSearched}<p class="field-help">No matching Stripe Product family was found for &quot;{formName}&quot;. Check the listing name and Stripe Product names or descriptions.</p>{/if}
 			{:else if modal === 'carousel'}
 				<p class="eyebrow">24-HOUR PRODUCT SPOT</p><h2>Put one product in the moving strip.</h2><p class="modal-intro">$10 buys the selected carousel position for exactly 24 hours. Your product must already be published. The spot is reserved before checkout.</p><div class="field"><label for="carousel-product">Product to display</label><select id="carousel-product" bind:value={carouselListingId}><option value="">Choose a published product</option>{#each listings.filter((listing) => listing.seller_id === user?.id) as listing}<option value={listing.id}>{listing.name}</option>{/each}</select></div><button class="button coral full" onclick={buyCarouselSpot}>Continue to secure checkout · $10</button>
 			{:else if modal === 'offer' && offerListing}
-				<p class="eyebrow">FIRST MOVE</p><h2>Open a conversation about {offerListing.name}.</h2><p class="modal-intro">This creates an offer and a private deal room. Acquisition funds are not held by BidLadders in this MVP.</p><div class="field"><label for="offer-amount">Your offer (USD)</label><input id="offer-amount" type="number" bind:value={offerAmount} min="0" /></div><div class="field"><label for="offer-message">Message to the seller</label><textarea id="offer-message" bind:value={offerMessage} rows="5" placeholder="Introduce yourself, explain the fit, and name your proposed next step..."></textarea></div><button class="button yellow full" onclick={submitOffer}>Send offer</button>
+				<p class="eyebrow">FIRST MOVE</p><h2>Open a conversation about {offerListing.name}.</h2><p class="modal-intro">This creates an offer and a private deal room. Acquisition funds are not held by HitLam in this MVP.</p><div class="field"><label for="offer-amount">Your offer (USD)</label><input id="offer-amount" type="number" bind:value={offerAmount} min="0" /></div><div class="field"><label for="offer-message">Message to the seller</label><textarea id="offer-message" bind:value={offerMessage} rows="5" placeholder="Introduce yourself, explain the fit, and name your proposed next step..."></textarea></div><button class="button yellow full" onclick={submitOffer}>Send offer</button>
 			{:else if modal === 'bid' && bidListing}
 				<p class="eyebrow">VISIBILITY BID</p><h2>Move {bidListing.name} up.</h2><p class="modal-intro">A successful bid keeps this product ranked until another paid bid replaces it. First paid rank is $2; every later target position must beat its current price by at least $0.50. Checkout opens after you submit.</p><div class="form-grid"><div class="field"><label for="bid-rank">Target rank</label><input id="bid-rank" type="number" bind:value={bidRank} min="1" max="330" /></div><div class="field"><label for="bid-amount">Bid (USD)</label><input id="bid-amount" type="number" bind:value={bidAmount} min="2" step="0.50" /></div></div><button class="button coral full" onclick={submitBid}>Continue to checkout</button>
 			{/if}

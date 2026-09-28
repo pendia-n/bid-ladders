@@ -5,8 +5,8 @@
 </script>
 
 <svelte:head>
-	<title>BidLadders — explore products, find your next opportunity</title>
-	<meta name="description" content="Product-level MRR verification and a transparent acquisition ranking for small internet businesses." />
+	<title>HitLam - A Praising On Your Stamina</title>
+	<meta name="description" content="HitLam - A Praising On Your Stamina" />
 </svelte:head>
 
 {@render children()}
