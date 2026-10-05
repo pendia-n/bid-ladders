@@ -548,7 +548,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 			const db = getDb(event);
 			const orders = await db.prepare("SELECT c.slot_id, c.listing_id, c.starts_at, c.expires_at, l.name, l.product_url, l.summary, l.product_icon_key, (SELECT object_key FROM listing_images image WHERE image.listing_id = l.id ORDER BY image.sort_order ASC, image.id ASC LIMIT 1) AS first_image_key FROM carousel_orders c JOIN listings l ON l.id = c.listing_id WHERE c.status = 'paid' AND c.expires_at > ? AND l.status = 'published' ORDER BY c.slot_id").bind(now()).all<any>();
 			const active = new Map((orders.results ?? []).map((row: any) => [Number(row.slot_id), { ...row, image_url: mediaUrl(row.product_icon_key || row.first_image_key || '') }]));
-			const slots = await Promise.all(Array.from({ length: 12 }, (_, index) => carouselRequest(event, index + 1, '/', {}).catch(() => ({ slot: { status: 'available' } }))));
+			const slots = await Promise.all(Array.from({ length: 12 }, (_, index) => carouselRequest(event, index + 1, '/', {}).catch(() => ({ slot: { status: 'reserved' } }))));
 			return json({ slots: slots.map((data, index) => ({ id: index + 1, ...data.slot, listing: active.get(index + 1) || null })) });
 		} catch (error: any) { return json({ error: error?.message || 'Carousel unavailable' }, 503); }
 	}
@@ -561,15 +561,18 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!listing) return json({ error: 'Choose one of your published products' }, 404);
 		const stripeKey = envFrom(event).STRIPE_SECRET_KEY; if (!stripeKey) return json({ error: 'Carousel payments are not configured yet. Add STRIPE_SECRET_KEY to this Worker.' }, 503);
 		let reservation: any;
+		let checkoutCreated = false;
 		try {
 			reservation = (await carouselRequest(event, slotId, '/reserve', { listingId, sellerId: user.id })).slot;
 			const reservedUntil = new Date(reservation.reservedUntil).toISOString();
 			const result = await getDb(event).prepare('INSERT INTO carousel_orders (slot_id, listing_id, seller_id, reservation_id, reserved_until) VALUES (?, ?, ?, ?, ?)').bind(slotId, listingId, user.id, reservation.reservationId, reservedUntil).run();
-				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
+			const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.ceil(Date.now() / 1000) + 30 * 60), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
+			checkoutCreated = true;
+			await carouselRequest(event, slotId, '/checkout', { reservationId: reservation.reservationId, orderId: result.meta.last_row_id, sessionId: session.id });
 			await getDb(event).prepare('UPDATE carousel_orders SET checkout_session_id = ? WHERE id = ?').bind(session.id, result.meta.last_row_id).run();
 			return json({ url: session.url, sessionId: session.id, reservedUntil });
 		} catch (error: any) {
-			if (reservation?.reservationId) await carouselRequest(event, slotId, '/release', { reservationId: reservation.reservationId }).catch(() => undefined);
+			if (!checkoutCreated && reservation?.reservationId) await carouselRequest(event, slotId, '/release', { reservationId: reservation.reservationId }).catch(() => undefined);
 			return json({ error: error?.message || 'Unable to reserve carousel spot' }, error?.message?.includes('no longer available') ? 409 : 400);
 		}
 	}
@@ -810,13 +813,14 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
 			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, seller_id, reservation_id FROM carousel_orders WHERE id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id)).first<any>();
 			if (order) {
-				const confirmed = await carouselRequest(event, Number(order.slot_id), '/confirm', { reservationId: order.reservation_id }).catch(() => null);
-				if (confirmed) { const started = new Date(confirmed.slot.startsAt).toISOString(); const expires = new Date(confirmed.slot.expiresAt).toISOString(); await getDb(event).prepare("UPDATE carousel_orders SET status = 'paid', paid_at = ?, starts_at = ?, expires_at = ?, checkout_session_id = ? WHERE id = ?").bind(started, started, expires, session.id, order.id).run(); await audit(event, order.seller_id, 'carousel.paid', 'carousel_order', String(order.id), { checkoutSessionId: session.id, slotId: order.slot_id }); }
+				if (session.payment_status !== 'paid') return json({ error: 'Checkout is not paid' }, 400);
+				await carouselRequest(event, Number(order.slot_id), '/confirm', { reservationId: order.reservation_id, sessionId: session.id });
+				await audit(event, order.seller_id, 'carousel.paid', 'carousel_order', String(order.id), { checkoutSessionId: session.id, slotId: order.slot_id });
 			}
 		}
 		if (stripeEvent.type === 'checkout.session.expired' && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
 			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, reservation_id FROM carousel_orders WHERE id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id)).first<any>();
-			if (order) { await carouselRequest(event, Number(order.slot_id), '/release', { reservationId: order.reservation_id }).catch(() => undefined); await getDb(event).prepare("UPDATE carousel_orders SET status = 'expired' WHERE id = ?").bind(order.id).run(); }
+			if (order) { await carouselRequest(event, Number(order.slot_id), '/release', { reservationId: order.reservation_id, sessionId: session.id }); await getDb(event).prepare("UPDATE carousel_orders SET status = 'expired' WHERE id = ?").bind(order.id).run(); }
 		}
 		if (stripeEvent.type === 'checkout.session.expired' && stripeEvent.data.object.metadata?.type === 'rank_bid') {
 			const session = stripeEvent.data.object;
