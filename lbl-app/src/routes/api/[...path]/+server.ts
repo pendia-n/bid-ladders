@@ -484,7 +484,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 
 	if (route === 'auth/login/totp' && method === 'POST') {
 		const input = await body(event);
-		try { return json(await completeTotpLogin(event, Number(input.userId), String(input.code || ''))); }
+		try { return json(await completeTotpLogin(event, String(input.loginChallenge || ''), String(input.code || ''))); }
 		catch (error: any) { return json({ error: error?.message || 'Invalid TOTP code' }, 401); }
 	}
 
@@ -609,6 +609,10 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const listing = await getDb(event).prepare('SELECT id, mrr_cents, verified_at FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number; mrr_cents: number; verified_at: string | null }>();
 		if (!listing) return json({ error: 'Listing not found' }, 404);
 		const name = String(input.name || '').trim(); const summary = String(input.summary || '').trim(); const description = String(input.description || '').trim(); const productUrl = String(input.productUrl || '').trim(); const assetsIncluded = String(input.assetsIncluded || '').trim(); const mrrStatus = ['unknown', 'zero', 'verified'].includes(input.mrrStatus) ? input.mrrStatus : 'unknown'; const githubUrl = String(input.githubUrl || '').trim();
+		if (input.publish !== true) {
+			const placement = await getDb(event).prepare("SELECT id FROM carousel_orders WHERE listing_id = ? AND ((status = 'paid' AND expires_at > ?) OR (status = 'reserved' AND checkout_session_id IS NOT NULL)) LIMIT 1").bind(listingId, now()).first();
+			if (placement) return json({ error: 'This product cannot be unpublished while its paid carousel spot is active or its checkout is unresolved' }, 409);
+		}
 		if (!name || !summary || !productUrl || !assetsIncluded) return json({ error: 'Product URL, name, summary, and assets included are required' }, 400);
 		if (mrrStatus === 'zero' && description.length < 60) return json({ error: 'A $0 MRR listing needs a detailed description of at least 60 characters' }, 400);
 		await getDb(event).prepare('UPDATE listings SET product_url = ?, name = ?, summary = ?, description = ?, asking_price_cents = ?, mrr_status = ?, mrr_cents = ?, verified_at = ?, operating_cost_cents = ?, assets_included = ?, for_sale = ?, status = ?, updated_at = ? WHERE id = ? AND seller_id = ?').bind(productUrl, name, summary, description || null, asCents(input.askingPrice), mrrStatus, mrrStatus === 'verified' ? listing.mrr_cents : 0, mrrStatus === 'verified' ? listing.verified_at : null, asCents(input.operatingCost), assetsIncluded, input.forSale === false ? 0 : 1, input.publish ? 'published' : 'draft', now(), listingId, user.id).run();
@@ -623,6 +627,8 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const listingId = Number(segments[1]);
 		const listing = await getDb(event).prepare('SELECT id FROM listings WHERE id = ? AND seller_id = ?').bind(listingId, user.id).first<{ id: number }>();
 		if (!listing) return json({ error: 'Listing not found' }, 404);
+		const placement = await getDb(event).prepare("SELECT id FROM carousel_orders WHERE listing_id = ? AND ((status = 'paid' AND expires_at > ?) OR (status = 'reserved' AND checkout_session_id IS NOT NULL)) LIMIT 1").bind(listingId, now()).first();
+		if (placement) return json({ error: 'This product cannot be removed while its paid carousel spot is active or its checkout is unresolved' }, 409);
 		await getDb(event).prepare("UPDATE listings SET status = 'paused', updated_at = ? WHERE id = ? AND seller_id = ?").bind(now(), listingId, user.id).run();
 		await audit(event, user.id, 'listing.removed', 'listing', String(listingId), { status: 'paused', public: false });
 		return json({ ok: true });

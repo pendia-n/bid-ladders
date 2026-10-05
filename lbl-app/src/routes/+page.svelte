@@ -39,7 +39,7 @@
 	let authUsername = $state('');
 	let authPassword = $state('');
 	let authCode = $state('');
-	let authUserId = $state(0);
+	let authLoginChallenge = $state('');
 	let authTotpRequired = $state(false);
 	let registrationTotp = $state<{ secret: string; otpauth: string } | null>(null);
 	let registrationTotpCode = $state('');
@@ -144,7 +144,7 @@
 	}
 
 	async function openAuth(mode: 'login' | 'signup') {
-		authMode = mode; authTotpRequired = false; error = '';
+		authMode = mode; authTotpRequired = false; authLoginChallenge = ''; error = '';
 		if (mode === 'login') { registrationTotp = null; registrationTotpQr = ''; registrationTotpCode = ''; registrationTotpEnabled = false; }
 		modal = 'auth';
 	}
@@ -232,16 +232,16 @@
 		error = '';
 		try {
 			const endpoint = authTotpRequired ? 'auth/login/totp' : authMode === 'signup' ? 'auth/signup' : 'auth/login';
-			const payload = authTotpRequired ? { userId: authUserId, code: authCode } : { username: authUsername, password: authPassword, role: authRole, totpSecret: authMode === 'signup' && registrationTotpEnabled ? registrationTotp?.secret : '', totpCode: authMode === 'signup' && registrationTotpEnabled ? registrationTotpCode : '' };
+			const payload = authTotpRequired ? { loginChallenge: authLoginChallenge, code: authCode } : { username: authUsername, password: authPassword, role: authRole, totpSecret: authMode === 'signup' && registrationTotpEnabled ? registrationTotp?.secret : '', totpCode: authMode === 'signup' && registrationTotpEnabled ? registrationTotpCode : '' };
 			const data = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
-			if (data.totpRequired) { authUserId = data.userId; authTotpRequired = true; authCode = ''; return; }
+			if (data.totpRequired) { authLoginChallenge = data.loginChallenge; authTotpRequired = true; authCode = ''; return; }
 			token = data.token; user = data.user; localStorage.setItem('lbl-token', token);
 			if (authMode === 'signup' && profileFile) {
 				const form = new FormData(); form.append('image', profileFile);
 				await api('media/profile', { method: 'POST', body: form });
 				user = (await api('auth/me')).user;
 			}
-			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; profileFile = null; notice = 'Welcome back.'; await loadDeals();
+			modal = authMode === 'login' && offerListing && data.user.role === 'buyer' ? 'offer' : null; authPassword = ''; authCode = ''; authTotpRequired = false; authLoginChallenge = ''; profileFile = null; notice = 'Welcome back.'; await loadDeals();
 		} catch (cause) { error = cause instanceof Error ? cause.message : 'Unable to authenticate'; }
 	}
 
