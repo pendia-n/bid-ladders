@@ -780,8 +780,18 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!listing) return json({ error: 'Published listing not found' }, 404);
 		const input = await body(event); const desiredRank = Math.max(1, Math.min(330, Number(input.desiredRank || 1)));
 		await getDb(event).prepare('DELETE FROM rank_reservations WHERE reserved_until <= ?').bind(now()).run();
-			const activeBids = await getDb(event).prepare("SELECT amount_cents FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC").bind(now()).all<{ amount_cents: number }>();
-			const targetBid = activeBids.results?.[desiredRank - 1]; const minimum = targetBid ? Number(targetBid.amount_cents) + 50 : 200; const amount = asCents(input.amount);
+			const activeBids = await getDb(event).prepare("SELECT listing_id, amount_cents FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC").bind(now()).all<{ listing_id: number; amount_cents: number }>();
+			const rankedBids: { listing_id: number; amount_cents: number }[] = [];
+			const rankedListingIds = new Set<number>();
+			for (const bid of activeBids.results ?? []) {
+				const rankedListingId = Number(bid.listing_id);
+				if (rankedListingIds.has(rankedListingId)) continue;
+				rankedListingIds.add(rankedListingId);
+				rankedBids.push(bid);
+			}
+			const currentRank = rankedBids.findIndex((bid) => Number(bid.listing_id) === listingId) + 1;
+		if (currentRank === 1) return json({ error: 'This product is already ranked #1 and cannot pay to move higher' }, 409);
+		const targetBid = rankedBids[desiredRank - 1]; const minimum = targetBid ? Number(targetBid.amount_cents) + 50 : 200; const amount = asCents(input.amount);
 		if (amount < minimum) return json({ error: `Minimum bid for this position is $${(minimum / 100).toFixed(2)}`, minimum: minimum / 100 }, 400);
 		const stripeKey = envFrom(event).STRIPE_SECRET_KEY; if (!stripeKey) return json({ error: 'Bid payments are not configured yet. Add STRIPE_SECRET_KEY to this Worker.' }, 503);
 			const expires = new Date(Date.now() + CAROUSEL_RESERVATION_MS).toISOString(); const pending = await getDb(event).prepare('INSERT INTO bids (listing_id, seller_id, amount_cents, desired_rank, expires_at) VALUES (?, ?, ?, ?, ?)').bind(listingId, user.id, amount, desiredRank, expires).run(); const bidId = Number(pending.meta.last_row_id);
