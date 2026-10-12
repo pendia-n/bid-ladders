@@ -15,7 +15,7 @@ type SlotRecord = {
 
 type CarouselEnv = { DB: D1Database; STRIPE_SECRET_KEY: string };
 
-const reservationMs = 35 * 60 * 1000;
+const reservationMs = 6 * 60 * 1000;
 const placementMs = 24 * 60 * 60 * 1000;
 const retryMs = 60 * 1000;
 
@@ -101,6 +101,22 @@ export class CarouselSlot {
 			// Keep the spot unavailable until Stripe confirms whether checkout was paid.
 			return this.retry(record, timestamp);
 		}
+		if (session.status === 'open') {
+			try {
+				const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(record.checkoutSessionId)}/expire`, {
+					method: 'POST',
+					headers: { authorization: `Bearer ${this.env.STRIPE_SECRET_KEY}` }
+				});
+				if (response.ok) session = await response.json() as typeof session;
+				else session = await (async () => {
+					const latest = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(record.checkoutSessionId!)}`, { headers: { authorization: `Bearer ${this.env.STRIPE_SECRET_KEY}` } });
+					if (!latest.ok) throw new Error(`Stripe returned ${latest.status}`);
+					return await latest.json() as typeof session;
+				})();
+			} catch {
+				return this.retry(record, timestamp);
+			}
+		}
 		if (session.status === 'complete' && session.payment_status === 'paid') return this.activate(record, timestamp);
 		if (session.status === 'expired') return this.expire(record);
 		return this.retry(record, timestamp);
@@ -120,9 +136,11 @@ export class CarouselSlot {
 		}
 		if (url.pathname === '/checkout') {
 			if (current.status !== 'reserved' || current.reservationId !== String(input.reservationId) || current.checkoutSessionId) return Response.json({ error: 'Carousel reservation is no longer valid' }, { status: 409 });
-			const record = { ...current, orderId: Number(input.orderId), checkoutSessionId: String(input.sessionId) };
+			const deadline = Number(input.deadline);
+			const record = { ...current, orderId: Number(input.orderId), checkoutSessionId: String(input.sessionId), reservedUntil: Number.isFinite(deadline) ? deadline : Date.now() + reservationMs };
 			if (!Number.isInteger(record.orderId) || record.orderId < 1 || !record.checkoutSessionId.startsWith('cs_')) return Response.json({ error: 'Invalid checkout session' }, { status: 400 });
 			await this.ctx.storage.put('slot', record);
+			await this.ctx.storage.setAlarm(record.reservedUntil);
 			return Response.json({ slot: record });
 		}
 		if (url.pathname === '/confirm') {

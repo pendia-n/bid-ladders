@@ -8,7 +8,8 @@ const now = () => new Date().toISOString();
 const asCents = (value: unknown) => Math.max(0, Math.round(Number(value || 0) * 100));
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_MEDIA_BYTES = 1 * 1024 * 1024;
-const CAROUSEL_RESERVATION_MS = 35 * 60 * 1000;
+const CAROUSEL_RESERVATION_MS = 6 * 60 * 1000;
+const STRIPE_CHECKOUT_MINIMUM_EXPIRY_SECONDS = 30 * 60;
 const PERMANENT_BID_EXPIRY = '9999-12-31T23:59:59.999Z';
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const MESSAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'application/pdf']);
@@ -104,6 +105,17 @@ async function carouselRequest(event: RequestEvent, slotId: number, path: string
 	const data = await response.json() as any;
 	if (!response.ok) throw new Error(data.error || 'Carousel slot is unavailable');
 	return data;
+}
+
+async function watchRankCheckout(event: RequestEvent, bidId: number, sessionId: string, deadline: number) {
+	const namespace = envFrom(event).RANK_CHECKOUT_EXPIRY;
+	if (!namespace) throw new Error('Rank checkout expiry is not configured');
+	const object = namespace.get(namespace.idFromName(`rank-bid-${bidId}`));
+	const response = await object.fetch('https://rank-checkout.internal/watch', {
+		method: 'POST', headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ bidId, sessionId, deadline })
+	});
+	if (!response.ok) throw new Error('Unable to schedule checkout expiry');
 }
 
 function normalized(value: string) { return value.trim().toLowerCase().replace(/\s+/g, ' '); }
@@ -562,17 +574,24 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const stripeKey = envFrom(event).STRIPE_SECRET_KEY; if (!stripeKey) return json({ error: 'Carousel payments are not configured yet. Add STRIPE_SECRET_KEY to this Worker.' }, 503);
 		let reservation: any;
 		let checkoutCreated = false;
+		let checkoutSession: any;
+		let orderId = 0;
 		try {
 			reservation = (await carouselRequest(event, slotId, '/reserve', { listingId, sellerId: user.id })).slot;
 			const reservedUntil = new Date(reservation.reservedUntil).toISOString();
 			const result = await getDb(event).prepare('INSERT INTO carousel_orders (slot_id, listing_id, seller_id, reservation_id, reserved_until) VALUES (?, ?, ?, ?, ?)').bind(slotId, listingId, user.id, reservation.reservationId, reservedUntil).run();
-			const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.ceil(Date.now() / 1000) + 30 * 60), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(result.meta.last_row_id), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
+			orderId = Number(result.meta.last_row_id);
+			checkoutSession = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.ceil(Date.now() / 1000) + STRIPE_CHECKOUT_MINIMUM_EXPIRY_SECONDS), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam 24-hour product spot: ${listing.name}`, 'line_items[0][price_data][unit_amount]': '1000', 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?carousel=cancelled`, 'metadata[type]': 'carousel_spot', 'metadata[order_id]': String(orderId), 'metadata[slot_id]': String(slotId), 'metadata[listing_id]': String(listingId), 'metadata[reservation_id]': reservation.reservationId }));
 			checkoutCreated = true;
-			await carouselRequest(event, slotId, '/checkout', { reservationId: reservation.reservationId, orderId: result.meta.last_row_id, sessionId: session.id });
-			await getDb(event).prepare('UPDATE carousel_orders SET checkout_session_id = ? WHERE id = ?').bind(session.id, result.meta.last_row_id).run();
-			return json({ url: session.url, sessionId: session.id, reservedUntil });
+			const checkoutDeadline = (Number(checkoutSession.created) || Math.floor(Date.now() / 1000)) * 1000 + CAROUSEL_RESERVATION_MS;
+			const attached = await carouselRequest(event, slotId, '/checkout', { reservationId: reservation.reservationId, orderId, sessionId: checkoutSession.id, deadline: checkoutDeadline });
+			const checkoutReservedUntil = new Date(attached.slot.reservedUntil).toISOString();
+			await getDb(event).prepare('UPDATE carousel_orders SET checkout_session_id = ?, reserved_until = ? WHERE id = ?').bind(checkoutSession.id, checkoutReservedUntil, orderId).run();
+			return json({ url: checkoutSession.url, sessionId: checkoutSession.id, reservedUntil: checkoutReservedUntil });
 		} catch (error: any) {
-			if (!checkoutCreated && reservation?.reservationId) await carouselRequest(event, slotId, '/release', { reservationId: reservation.reservationId }).catch(() => undefined);
+			if (checkoutCreated && checkoutSession?.id) await stripePost(stripeKey, `checkout/sessions/${checkoutSession.id}/expire`, new URLSearchParams()).catch(() => undefined);
+			if (reservation?.reservationId) await carouselRequest(event, slotId, '/release', { reservationId: reservation.reservationId, sessionId: checkoutSession?.id }).catch(() => undefined);
+			if (orderId) await getDb(event).prepare("UPDATE carousel_orders SET status = 'expired' WHERE id = ? AND status = 'reserved'").bind(orderId).run().catch(() => undefined);
 			return json({ error: error?.message || 'Unable to reserve carousel spot' }, error?.message?.includes('no longer available') ? 409 : 400);
 		}
 	}
@@ -780,7 +799,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!listing) return json({ error: 'Published listing not found' }, 404);
 		const input = await body(event); const desiredRank = Math.max(1, Math.min(330, Number(input.desiredRank || 1)));
 		await getDb(event).prepare('DELETE FROM rank_reservations WHERE reserved_until <= ?').bind(now()).run();
-			const activeBids = await getDb(event).prepare("SELECT listing_id, amount_cents FROM bids WHERE status = 'paid' AND expires_at > ? ORDER BY amount_cents DESC, paid_at ASC, id ASC").bind(now()).all<{ listing_id: number; amount_cents: number }>();
+			const activeBids = await getDb(event).prepare("SELECT b.listing_id, b.amount_cents FROM bids b JOIN listings l ON l.id = b.listing_id AND l.status = 'published' WHERE b.status = 'paid' AND b.expires_at > ? ORDER BY b.amount_cents DESC, b.paid_at ASC, b.id ASC").bind(now()).all<{ listing_id: number; amount_cents: number }>();
 			const rankedBids: { listing_id: number; amount_cents: number }[] = [];
 			const rankedListingIds = new Set<number>();
 			for (const bid of activeBids.results ?? []) {
@@ -789,18 +808,34 @@ async function handle(event: RequestEvent): Promise<Response> {
 				rankedListingIds.add(rankedListingId);
 				rankedBids.push(bid);
 			}
-			const currentRank = rankedBids.findIndex((bid) => Number(bid.listing_id) === listingId) + 1;
-		if (currentRank === 1) return json({ error: 'This product is already ranked #1 and cannot pay to move higher' }, 409);
+		let isRankOne = Number(rankedBids[0]?.listing_id) === listingId;
+		if (!rankedBids.length) {
+			const firstListing = await getDb(event).prepare("SELECT id FROM listings WHERE status = 'published' ORDER BY created_at ASC, id ASC LIMIT 1").first<{ id: number }>();
+			isRankOne = Number(firstListing?.id) === listingId;
+		}
+		if (isRankOne) return json({ error: 'This product is already ranked #1 and cannot pay to move higher' }, 409);
 		const targetBid = rankedBids[desiredRank - 1]; const minimum = targetBid ? Number(targetBid.amount_cents) + 50 : 200; const amount = asCents(input.amount);
 		if (amount < minimum) return json({ error: `Minimum bid for this position is $${(minimum / 100).toFixed(2)}`, minimum: minimum / 100 }, 400);
 		const stripeKey = envFrom(event).STRIPE_SECRET_KEY; if (!stripeKey) return json({ error: 'Bid payments are not configured yet. Add STRIPE_SECRET_KEY to this Worker.' }, 503);
+		if (!envFrom(event).RANK_CHECKOUT_EXPIRY) return json({ error: 'Rank checkout expiry is not configured' }, 503);
 			const expires = new Date(Date.now() + CAROUSEL_RESERVATION_MS).toISOString(); const pending = await getDb(event).prepare('INSERT INTO bids (listing_id, seller_id, amount_cents, desired_rank, expires_at) VALUES (?, ?, ?, ?, ?)').bind(listingId, user.id, amount, desiredRank, expires).run(); const bidId = Number(pending.meta.last_row_id);
 			try { await getDb(event).prepare('INSERT INTO rank_reservations (desired_rank, bid_id, reserved_until) VALUES (?, ?, ?)').bind(desiredRank, bidId, expires).run(); }
 			catch { await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run(); return json({ error: 'Another checkout is already holding that rank. Choose another position or wait for it to expire.' }, 409); }
+			let checkoutSession: any;
 			try {
-				const session = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.floor((Date.now() + CAROUSEL_RESERVATION_MS) / 1000)), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam rank boost: ${listing.name}`, 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=cancelled`, 'metadata[type]': 'rank_bid', 'metadata[bid_id]': String(bidId), 'metadata[listing_id]': String(listingId), 'metadata[desired_rank]': String(desiredRank) }));
-				await getDb(event).prepare('UPDATE bids SET checkout_session_id = ? WHERE id = ?').bind(session.id, bidId).run(); return json({ url: session.url, sessionId: session.id });
-			} catch (error) { await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run(); await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run(); throw error; }
+				checkoutSession = await stripePost(stripeKey, 'checkout/sessions', new URLSearchParams({ mode: 'payment', 'payment_method_types[0]': 'card', expires_at: String(Math.ceil(Date.now() / 1000) + STRIPE_CHECKOUT_MINIMUM_EXPIRY_SECONDS), 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][product_data][name]': `HitLam rank boost: ${listing.name}`, 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][quantity]': '1', success_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=success`, cancel_url: `${envFrom(event).APP_URL || event.url.origin}/?bid=cancelled`, 'metadata[type]': 'rank_bid', 'metadata[bid_id]': String(bidId), 'metadata[listing_id]': String(listingId), 'metadata[desired_rank]': String(desiredRank) }));
+				const checkoutDeadline = (Number(checkoutSession.created) || Math.floor(Date.now() / 1000)) * 1000 + CAROUSEL_RESERVATION_MS;
+				const checkoutExpiresAt = new Date(checkoutDeadline).toISOString();
+				await getDb(event).prepare('UPDATE bids SET checkout_session_id = ?, expires_at = ? WHERE id = ?').bind(checkoutSession.id, checkoutExpiresAt, bidId).run();
+				await getDb(event).prepare('UPDATE rank_reservations SET reserved_until = ? WHERE bid_id = ?').bind(checkoutExpiresAt, bidId).run();
+				await watchRankCheckout(event, bidId, checkoutSession.id, checkoutDeadline);
+				return json({ url: checkoutSession.url, sessionId: checkoutSession.id });
+			} catch (error) {
+				if (checkoutSession?.id) await stripePost(stripeKey, `checkout/sessions/${checkoutSession.id}/expire`, new URLSearchParams()).catch(() => undefined);
+				await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run();
+				await getDb(event).prepare("UPDATE bids SET status = 'cancelled' WHERE id = ?").bind(bidId).run();
+				throw error;
+			}
 	}
 
 	if (route === 'escrow/webhook' && method === 'POST') {
@@ -823,7 +858,7 @@ async function handle(event: RequestEvent): Promise<Response> {
 		if (!signature || !secret || !(await verifyStripeSignature(raw, signature, secret))) return json({ error: 'Invalid Stripe signature' }, 401);
 		const stripeEvent = JSON.parse(raw);
 		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'rank_bid') {
-			const session = stripeEvent.data.object; const bidId = Number(session.metadata.bid_id); const bid = await getDb(event).prepare("SELECT id, listing_id, seller_id FROM bids WHERE id = ? AND status = 'pending' AND expires_at > ?").bind(bidId, now()).first<any>();
+			const session = stripeEvent.data.object; const bidId = Number(session.metadata.bid_id); const bid = await getDb(event).prepare("SELECT id, listing_id, seller_id FROM bids WHERE id = ? AND status = 'pending'").bind(bidId).first<any>();
 			if (bid && ['paid', 'no_payment_required'].includes(String(session.payment_status || 'paid'))) { const started = now(); await getDb(event).prepare("UPDATE bids SET status = 'paid', paid_at = ?, starts_at = ?, expires_at = ?, checkout_session_id = ? WHERE id = ? AND status = 'pending'").bind(started, started, PERMANENT_BID_EXPIRY, session.id, bidId).run(); await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run(); await getDb(event).prepare("UPDATE bids SET status = 'expired' WHERE listing_id = ? AND id <> ? AND status = 'paid'").bind(bid.listing_id, bidId).run(); await audit(event, bid.seller_id, 'bid.paid', 'bid', String(bidId), { checkoutSessionId: session.id, replacedPreviousBid: true }); }
 		}
 		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'carousel_spot') {

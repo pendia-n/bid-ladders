@@ -10,6 +10,7 @@ export type EnvBindings = {
 	DB?: D1Database;
 	MEDIA?: R2Bucket;
 	CAROUSEL_SLOTS?: DurableObjectNamespace;
+	RANK_CHECKOUT_EXPIRY?: DurableObjectNamespace;
 	JWT_SECRET?: string;
 	ENCRYPTION_KEY?: string;
 	STRIPE_SECRET_KEY?: string;

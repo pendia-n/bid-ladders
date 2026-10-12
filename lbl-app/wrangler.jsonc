@@ -35,11 +35,13 @@
 	],
 	"durable_objects": {
 		"bindings": [
-			{ "name": "CAROUSEL_SLOTS", "class_name": "CarouselSlot" }
+			{ "name": "CAROUSEL_SLOTS", "class_name": "CarouselSlot" },
+			{ "name": "RANK_CHECKOUT_EXPIRY", "class_name": "RankCheckoutExpiry" }
 		]
 	},
 	"migrations": [
-		{ "tag": "v1", "new_sqlite_classes": ["CarouselSlot"] }
+		{ "tag": "v1", "new_sqlite_classes": ["CarouselSlot"] },
+		{ "tag": "v2", "new_sqlite_classes": ["RankCheckoutExpiry"] }
 	]
 	/**
 	 * Smart Placement
