@@ -3,6 +3,7 @@ import { base64UrlDecode, base64UrlEncode, decryptText, encryptText, signHs256, 
 import { completeTotpLogin, envFrom, getDb, loginUser, registerUser, requireUser, userFromToken, verifyUserTotp, type AuthUser } from '$lib/server/auth';
 import { createEscrowTransaction, escrowWebLink, getEscrowTransaction, platformFeeForAmount } from '$lib/server/escrow';
 import { scanStripeRevenue } from '$lib/server/stripe-revenue';
+import { checkoutPaymentParameters, fulfillRankCheckout, isPaidCheckoutEvent } from '$lib/server/checkout-payments';
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const now = () => new Date().toISOString();
@@ -11,7 +12,6 @@ const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_MEDIA_BYTES = 1 * 1024 * 1024;
 const CAROUSEL_RESERVATION_MS = 6 * 60 * 1000;
 const STRIPE_CHECKOUT_MINIMUM_EXPIRY_SECONDS = 30 * 60;
-const PERMANENT_BID_EXPIRY = '9999-12-31T23:59:59.999Z';
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const MESSAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'application/pdf']);
 
@@ -62,6 +62,7 @@ async function stripeGet(key: string, path: string) {
 }
 
 async function stripePost(key: string, path: string, params: URLSearchParams) {
+	if (path === 'checkout/sessions') params = checkoutPaymentParameters(Object.fromEntries(params));
 	const response = await fetch(`https://api.stripe.com/v1/${path}`, { method: 'POST', headers: stripeHeaders(key), body: params.toString() });
 	const data = await response.json() as any;
 	if (!response.ok) throw new Error(data?.error?.message || 'Stripe request failed');
@@ -688,7 +689,8 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const listing = await getDb(event).prepare("SELECT id, name, seller_id FROM listings WHERE id = ? AND seller_id = ? AND status = 'published' AND for_sale = 1").bind(listingId, user.id).first<any>();
 		if (!listing) return json({ error: 'Published listing not found' }, 404);
 		const input = await body(event); const desiredRank = Math.max(1, Math.min(330, Number(input.desiredRank || 1)));
-		await getDb(event).prepare('DELETE FROM rank_reservations WHERE reserved_until <= ?').bind(now()).run();
+		// Pending payments remain held until Stripe confirms payment or expiry.
+		await getDb(event).prepare("DELETE FROM rank_reservations WHERE reserved_until <= ? AND bid_id IN (SELECT id FROM bids WHERE status <> 'pending')").bind(now()).run();
 			const activeBids = await getDb(event).prepare("SELECT b.listing_id, b.amount_cents FROM bids b JOIN listings l ON l.id = b.listing_id AND l.status = 'published' WHERE b.status = 'paid' AND b.expires_at > ? ORDER BY b.amount_cents DESC, b.paid_at ASC, b.id ASC").bind(now()).all<{ listing_id: number; amount_cents: number }>();
 			const rankedBids: { listing_id: number; amount_cents: number }[] = [];
 			const rankedListingIds = new Set<number>();
@@ -747,25 +749,26 @@ async function handle(event: RequestEvent): Promise<Response> {
 		const signature = event.request.headers.get('stripe-signature'); const secret = envFrom(event).STRIPE_WEBHOOK_SECRET; const raw = await event.request.text();
 		if (!signature || !secret || !(await verifyStripeSignature(raw, signature, secret))) return json({ error: 'Invalid Stripe signature' }, 401);
 		const stripeEvent = JSON.parse(raw);
-		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'rank_bid') {
-			const session = stripeEvent.data.object; const bidId = Number(session.metadata.bid_id); const bid = await getDb(event).prepare("SELECT id, listing_id, seller_id FROM bids WHERE id = ? AND status = 'pending'").bind(bidId).first<any>();
-			if (bid && ['paid', 'no_payment_required'].includes(String(session.payment_status || 'paid'))) { const started = now(); await getDb(event).prepare("UPDATE bids SET status = 'paid', paid_at = ?, starts_at = ?, expires_at = ?, checkout_session_id = ? WHERE id = ? AND status = 'pending'").bind(started, started, PERMANENT_BID_EXPIRY, session.id, bidId).run(); await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(bidId).run(); await getDb(event).prepare("UPDATE bids SET status = 'expired' WHERE listing_id = ? AND id <> ? AND status = 'paid'").bind(bid.listing_id, bidId).run(); await audit(event, bid.seller_id, 'bid.paid', 'bid', String(bidId), { checkoutSessionId: session.id, replacedPreviousBid: true }); }
+		const paidCheckout = isPaidCheckoutEvent(stripeEvent.type, stripeEvent.data.object.payment_status);
+		if (paidCheckout && stripeEvent.data.object.metadata?.type === 'rank_bid') {
+			const session = stripeEvent.data.object; const bidId = Number(session.metadata.bid_id);
+			const bid = await fulfillRankCheckout(getDb(event), bidId, session.id);
+			if (bid) await audit(event, bid.seller_id, 'bid.paid', 'bid', String(bidId), { checkoutSessionId: session.id, replacedPreviousBid: true });
 		}
-		if (stripeEvent.type === 'checkout.session.completed' && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
-			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, seller_id, reservation_id FROM carousel_orders WHERE id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id)).first<any>();
+		if (paidCheckout && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
+			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, seller_id, reservation_id FROM carousel_orders WHERE id = ? AND checkout_session_id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id), session.id).first<any>();
 			if (order) {
-				if (session.payment_status !== 'paid') return json({ error: 'Checkout is not paid' }, 400);
 				await carouselRequest(event, Number(order.slot_id), '/confirm', { reservationId: order.reservation_id, sessionId: session.id });
 				await audit(event, order.seller_id, 'carousel.paid', 'carousel_order', String(order.id), { checkoutSessionId: session.id, slotId: order.slot_id });
 			}
 		}
-		if (stripeEvent.type === 'checkout.session.expired' && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
-			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, reservation_id FROM carousel_orders WHERE id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id)).first<any>();
-			if (order) { await carouselRequest(event, Number(order.slot_id), '/release', { reservationId: order.reservation_id, sessionId: session.id }); await getDb(event).prepare("UPDATE carousel_orders SET status = 'expired' WHERE id = ?").bind(order.id).run(); }
+		if (['checkout.session.expired', 'checkout.session.async_payment_failed'].includes(stripeEvent.type) && stripeEvent.data.object.metadata?.type === 'carousel_spot') {
+			const session = stripeEvent.data.object; const order = await getDb(event).prepare("SELECT id, slot_id, reservation_id FROM carousel_orders WHERE id = ? AND checkout_session_id = ? AND status = 'reserved'").bind(Number(session.metadata.order_id), session.id).first<any>();
+			if (order) { await carouselRequest(event, Number(order.slot_id), '/release', { reservationId: order.reservation_id, sessionId: session.id }); await getDb(event).prepare("UPDATE carousel_orders SET status = 'expired' WHERE id = ? AND status = 'reserved'").bind(order.id).run(); }
 		}
-		if (stripeEvent.type === 'checkout.session.expired' && stripeEvent.data.object.metadata?.type === 'rank_bid') {
+		if (['checkout.session.expired', 'checkout.session.async_payment_failed'].includes(stripeEvent.type) && stripeEvent.data.object.metadata?.type === 'rank_bid') {
 			const session = stripeEvent.data.object;
-			await getDb(event).prepare("UPDATE bids SET status = 'expired' WHERE id = ? AND status = 'pending'").bind(Number(session.metadata.bid_id)).run(); await getDb(event).prepare('DELETE FROM rank_reservations WHERE bid_id = ?').bind(Number(session.metadata.bid_id)).run();
+			await getDb(event).prepare("UPDATE bids SET status = 'expired' WHERE id = ? AND checkout_session_id = ? AND status = 'pending'").bind(Number(session.metadata.bid_id), session.id).run(); await getDb(event).prepare("DELETE FROM rank_reservations WHERE bid_id IN (SELECT id FROM bids WHERE id = ? AND checkout_session_id = ? AND status = 'expired')").bind(Number(session.metadata.bid_id), session.id).run();
 		}
 		return json({ received: true });
 	}

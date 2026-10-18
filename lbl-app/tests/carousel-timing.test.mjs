@@ -59,3 +59,26 @@ test('expired checkout releases an unpaid reservation', async () => {
 		assert.match(f.updates[0].sql, /status = 'expired'/);
 	} finally { Date.now = clock; globalThis.fetch = network; }
 });
+
+test('a processing stablecoin payment keeps its slot and receives 24 hours only after confirmation', async () => {
+	const network = globalThis.fetch;
+	const clock = Date.now;
+	let time = 1000000000;
+	let paymentStatus = 'unpaid';
+	Date.now = () => time;
+	try {
+		const f = fixture();
+		const reserved = (await f.call('/reserve', { listingId: 7, sellerId: 3 })).slot;
+		await f.call('/checkout', { reservationId: reserved.reservationId, orderId: 9, sessionId: 'cs_crypto' });
+		globalThis.fetch = async () => Response.json({ id: 'cs_crypto', status: 'complete', payment_status: paymentStatus });
+		time += 6 * 60 * 1000 + 1;
+		assert.equal((await f.call('/')).slot.status, 'reserved');
+		assert.equal(f.updates.length, 0);
+		paymentStatus = 'paid';
+		time += 61 * 1000;
+		const active = (await f.call('/')).slot;
+		assert.equal(active.status, 'paid');
+		assert.equal(active.startsAt, time);
+		assert.equal(active.expiresAt - active.startsAt, 24 * 60 * 60 * 1000);
+	} finally { globalThis.fetch = network; Date.now = clock; }
+});

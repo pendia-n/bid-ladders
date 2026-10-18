@@ -1,4 +1,5 @@
 import type { D1Database, DurableObjectState } from '@cloudflare/workers-types';
+import { fulfillRankCheckout } from './checkout-payments.ts';
 
 type CheckoutRecord = { sessionId: string; bidId: number; deadline: number };
 type CheckoutEnv = { DB: D1Database; STRIPE_SECRET_KEY: string };
@@ -63,6 +64,7 @@ export class RankCheckoutExpiry {
 				return;
 			}
 			if (session.status === 'complete' && session.payment_status === 'paid') {
+				await fulfillRankCheckout(this.env.DB, record.bidId, record.sessionId, timestamp);
 				await this.ctx.storage.delete('checkout');
 				return;
 			}
