@@ -1,7 +1,8 @@
 import type { D1Database } from '@cloudflare/workers-types';
 
 export function checkoutPaymentParameters(values: Record<string, string>): URLSearchParams {
-	return new URLSearchParams({ ...values, 'payment_method_types[0]': 'card', 'payment_method_types[1]': 'crypto' });
+	// Use Dashboard-managed payment methods, including eligible card and crypto payments.
+	return new URLSearchParams(values);
 }
 
 export function isPaidCheckoutEvent(eventType: string, paymentStatus: unknown): boolean {

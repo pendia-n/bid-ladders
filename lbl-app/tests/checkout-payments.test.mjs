@@ -21,12 +21,10 @@ function fixture() {
 	return { sqlite, DB, status: (bidId) => sqlite.prepare('SELECT status FROM bids WHERE id = ?').get(bidId).status };
 }
 
-test('both fixed ad pricing and custom rank pricing offer card and stablecoin Checkout', () => {
+test('fixed and custom USD Checkout use Dashboard payment methods without excluding crypto', () => {
 	for (const amount of ['1000', '350']) {
 		const params = checkoutPaymentParameters({ mode: 'payment', 'line_items[0][price_data][currency]': 'usd', 'line_items[0][price_data][unit_amount]': amount });
-		assert.equal(params.get('payment_method_types[0]'), 'card');
-		assert.equal(params.get('payment_method_types[1]'), 'crypto');
-		assert.equal(params.get('payment_method_types[2]'), null);
+		assert.equal([...params.keys()].some((key) => key.startsWith('payment_method_types') || key.startsWith('excluded_payment_method_types')), false);
 		assert.equal(params.get('line_items[0][price_data][currency]'), 'usd');
 		assert.equal(params.get('line_items[0][price_data][unit_amount]'), amount);
 	}
